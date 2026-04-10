@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.env
+.venv
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary
+tmp/
+temp/
+*.log
+*.tmp
+
+# Secrets
+*.key
+*.pem
+secrets.json
+credentials.json
+.env.local
+.env.*.local
