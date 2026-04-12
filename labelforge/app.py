@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from labelforge.config import settings
 from labelforge.api.v1.router import api_router
+from labelforge.api.v1.errors import register_error_handlers
 
 app = FastAPI(
     title="Labelforge API",
@@ -24,6 +25,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register standardized error handlers
+register_error_handlers(app)
 
 # Mount all API routes under /api/v1
 app.include_router(api_router, prefix="/api/v1")
