@@ -1,4 +1,4 @@
-.PHONY: install test lint format typecheck dev docker-up docker-down clean
+.PHONY: install test lint format typecheck dev docker-up docker-down clean schema
 
 # ── Install ──────────────────────────────────────────────────────────────────
 
@@ -40,6 +40,11 @@ docker-down:
 
 docker-build:
 	docker compose build
+
+# ── Schema ───────────────────────────────────────────────────────────────────
+
+schema:
+	PYTHONPATH=. python scripts/export_openapi.py -o api/schema.json
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
