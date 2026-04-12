@@ -1,0 +1,2411 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Labelforge API",
+    "description": "AI-driven export labeling automation",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/orders": {
+      "get": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "List Orders",
+        "description": "List orders with optional filtering.",
+        "operationId": "list_orders_api_v1_orders_get",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/OrderState"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by order state",
+              "title": "State"
+            },
+            "description": "Filter by order state"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search by PO number or order ID",
+              "title": "Search"
+            },
+            "description": "Search by PO number or order ID"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/orders/{order_id}": {
+      "get": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "Get Order",
+        "description": "Get a single order by ID.",
+        "operationId": "get_order_api_v1_orders__order_id__get",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Order Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/orders/{order_id}/items": {
+      "get": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "List Order Items",
+        "description": "List all items belonging to an order.",
+        "operationId": "list_order_items_api_v1_orders__order_id__items_get",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Order Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrderItem"
+                  },
+                  "title": "Response List Order Items Api V1 Orders  Order Id  Items Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/items": {
+      "get": {
+        "tags": [
+          "items"
+        ],
+        "summary": "List Items",
+        "description": "List all items with optional filtering.",
+        "operationId": "list_items_api_v1_items_get",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ItemState"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by item state",
+              "title": "State"
+            },
+            "description": "Filter by item state"
+          },
+          {
+            "name": "order_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by order ID",
+              "title": "Order Id"
+            },
+            "description": "Filter by order ID"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrderItem"
+                  },
+                  "title": "Response List Items Api V1 Items Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/items/{item_id}": {
+      "get": {
+        "tags": [
+          "items"
+        ],
+        "summary": "Get Item",
+        "description": "Get a single item by ID.",
+        "operationId": "get_item_api_v1_items__item_id__get",
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderItem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "List Documents",
+        "description": "List documents with optional filtering.",
+        "operationId": "list_documents_api_v1_documents_get",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by order ID",
+              "title": "Order Id"
+            },
+            "description": "Filter by order ID"
+          },
+          {
+            "name": "doc_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DocumentClass"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by document class",
+              "title": "Doc Class"
+            },
+            "description": "Filter by document class"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/upload": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Upload Document",
+        "description": "Upload a document and classify it.",
+        "operationId": "upload_document_api_v1_documents_upload_post",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Order to attach document to",
+              "title": "Order Id"
+            },
+            "description": "Order to attach document to"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_document_api_v1_documents_upload_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentUploadResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hitl/threads": {
+      "get": {
+        "tags": [
+          "hitl"
+        ],
+        "summary": "List Threads",
+        "description": "List HiTL threads with optional filtering.",
+        "operationId": "list_threads_api_v1_hitl_threads_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by status: OPEN, IN_PROGRESS, RESOLVED, ESCALATED",
+              "title": "Status"
+            },
+            "description": "Filter by status: OPEN, IN_PROGRESS, RESOLVED, ESCALATED"
+          },
+          {
+            "name": "priority",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by priority: P0, P1, P2",
+              "title": "Priority"
+            },
+            "description": "Filter by priority: P0, P1, P2"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hitl/threads/{thread_id}": {
+      "get": {
+        "tags": [
+          "hitl"
+        ],
+        "summary": "Get Thread",
+        "description": "Get a single HiTL thread with its messages.",
+        "operationId": "get_thread_api_v1_hitl_threads__thread_id__get",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hitl/threads/{thread_id}/messages": {
+      "post": {
+        "tags": [
+          "hitl"
+        ],
+        "summary": "Add Message",
+        "description": "Add a message to a HiTL thread.",
+        "operationId": "add_message_api_v1_hitl_threads__thread_id__messages_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HiTLMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/rules": {
+      "get": {
+        "tags": [
+          "rules"
+        ],
+        "summary": "List Rules",
+        "description": "List compliance rules with optional filtering.",
+        "operationId": "list_rules_api_v1_rules_get",
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by region (e.g. US, US-CA, EU)",
+              "title": "Region"
+            },
+            "description": "Filter by region (e.g. US, US-CA, EU)"
+          },
+          {
+            "name": "placement",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by placement: carton, product, both, hangtag",
+              "title": "Placement"
+            },
+            "description": "Filter by placement: carton, product, both, hangtag"
+          },
+          {
+            "name": "active",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by active status",
+              "title": "Active"
+            },
+            "description": "Filter by active status"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/rules/{rule_id}": {
+      "get": {
+        "tags": [
+          "rules"
+        ],
+        "summary": "Get Rule",
+        "description": "Get a single compliance rule by ID.",
+        "operationId": "get_rule_api_v1_rules__rule_id__get",
+        "parameters": [
+          {
+            "name": "rule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Rule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComplianceRule"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/importers": {
+      "get": {
+        "tags": [
+          "importers"
+        ],
+        "summary": "List Importers",
+        "description": "List importer profiles with optional search.",
+        "operationId": "list_importers_api_v1_importers_get",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search by importer ID",
+              "title": "Search"
+            },
+            "description": "Search by importer ID"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImporterListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/importers/{importer_id}": {
+      "get": {
+        "tags": [
+          "importers"
+        ],
+        "summary": "Get Importer",
+        "description": "Get a single importer profile by ID.",
+        "operationId": "get_importer_api_v1_importers__importer_id__get",
+        "parameters": [
+          {
+            "name": "importer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Importer Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImporterProfile"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/artifacts": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "List Artifacts",
+        "description": "List provenance artifacts with optional filtering.",
+        "operationId": "list_artifacts_api_v1_artifacts_get",
+        "parameters": [
+          {
+            "name": "artifact_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by artifact type",
+              "title": "Artifact Type"
+            },
+            "description": "Filter by artifact type"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notifications": {
+      "get": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "List Notifications",
+        "description": "List notifications with optional filtering.",
+        "operationId": "list_notifications_api_v1_notifications_get",
+        "parameters": [
+          {
+            "name": "severity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by severity: high, medium, low, info",
+              "title": "Severity"
+            },
+            "description": "Filter by severity: high, medium, low, info"
+          },
+          {
+            "name": "read",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by read status",
+              "title": "Read"
+            },
+            "description": "Filter by read status"
+          },
+          {
+            "name": "order_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by order ID",
+              "title": "Order Id"
+            },
+            "description": "Filter by order ID"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/warning-labels": {
+      "get": {
+        "tags": [
+          "warning-labels"
+        ],
+        "summary": "List Warning Labels",
+        "description": "List warning labels with optional filtering.",
+        "operationId": "list_warning_labels_api_v1_warning_labels_get",
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by region (e.g. US, US-CA, EU)",
+              "title": "Region"
+            },
+            "description": "Filter by region (e.g. US, US-CA, EU)"
+          },
+          {
+            "name": "placement",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by placement: carton, product, both, hangtag",
+              "title": "Placement"
+            },
+            "description": "Filter by placement: carton, product, both, hangtag"
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by warning code",
+              "title": "Code"
+            },
+            "description": "Filter by warning code"
+          },
+          {
+            "name": "active",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by active status",
+              "title": "Active"
+            },
+            "description": "Filter by active status"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WarningLabelListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/ping": {
+      "get": {
+        "summary": "Ping",
+        "description": "Minimal readiness probe for the API v1 prefix.",
+        "operationId": "ping_api_v1_ping_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Ping Api V1 Ping Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health Check",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Check Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ArtifactListResponse": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/Provenance"
+            },
+            "type": "array",
+            "title": "Artifacts"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "artifacts",
+          "total"
+        ],
+        "title": "ArtifactListResponse"
+      },
+      "Body_upload_document_api_v1_documents_upload_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_document_api_v1_documents_upload_post"
+      },
+      "ComplianceRule": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "region": {
+            "type": "string",
+            "title": "Region"
+          },
+          "placement": {
+            "type": "string",
+            "title": "Placement"
+          },
+          "active": {
+            "type": "boolean",
+            "title": "Active",
+            "default": true
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "code",
+          "version",
+          "title",
+          "description",
+          "region",
+          "placement",
+          "updated_at"
+        ],
+        "title": "ComplianceRule"
+      },
+      "CreateMessageRequest": {
+        "properties": {
+          "sender_type": {
+            "type": "string",
+            "title": "Sender Type",
+            "default": "human"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "title": "CreateMessageRequest"
+      },
+      "Document": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "order_id": {
+            "type": "string",
+            "title": "Order Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "doc_class": {
+            "$ref": "#/components/schemas/DocumentClass"
+          },
+          "storage_url": {
+            "type": "string",
+            "title": "Storage Url"
+          },
+          "page_count": {
+            "type": "integer",
+            "title": "Page Count"
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Uploaded At"
+          },
+          "parsed": {
+            "type": "boolean",
+            "title": "Parsed",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "order_id",
+          "filename",
+          "doc_class",
+          "storage_url",
+          "page_count",
+          "uploaded_at"
+        ],
+        "title": "Document"
+      },
+      "DocumentClass": {
+        "type": "string",
+        "enum": [
+          "PURCHASE_ORDER",
+          "PROFORMA_INVOICE",
+          "PROTOCOL",
+          "WARNING_LABELS",
+          "CHECKLIST",
+          "UNKNOWN"
+        ],
+        "title": "DocumentClass"
+      },
+      "DocumentListResponse": {
+        "properties": {
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/Document"
+            },
+            "type": "array",
+            "title": "Documents"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "documents",
+          "total"
+        ],
+        "title": "DocumentListResponse"
+      },
+      "DocumentUploadResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "doc_class": {
+            "$ref": "#/components/schemas/DocumentClass"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "filename",
+          "doc_class",
+          "message"
+        ],
+        "title": "DocumentUploadResponse"
+      },
+      "FrozenInputs": {
+        "properties": {
+          "profile_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Version"
+          },
+          "rules_snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rules Snapshot Id"
+          },
+          "asset_hashes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Asset Hashes"
+          },
+          "code_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code Sha"
+          }
+        },
+        "type": "object",
+        "title": "FrozenInputs",
+        "example": {
+          "asset_hashes": {
+            "fragile_symbol.svg": "sha256:c8e2a1f3d4567890abcdef1234567890",
+            "logo.svg": "sha256:b4d3f1a2c5e6789012345abcdef67890"
+          },
+          "code_sha": "abc1234def5678",
+          "profile_version": 2,
+          "rules_snapshot_id": "rules-2026-03-15-v4"
+        }
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HiTLMessage": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id"
+          },
+          "sender_type": {
+            "type": "string",
+            "title": "Sender Type"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "thread_id",
+          "sender_type",
+          "content"
+        ],
+        "title": "HiTLMessage",
+        "example": {
+          "content": "Net weight mismatch between PO (0.75 kg) and PI (0.80 kg) for item 1. Please confirm the correct value.",
+          "context": {
+            "delta_pct": 6.7,
+            "pi_weight": 0.8,
+            "po_weight": 0.75
+          },
+          "created_at": "2026-04-12T10:30:00Z",
+          "message_id": "MSG-20260412-001",
+          "sender_type": "agent",
+          "thread_id": "HITL-20260412-001"
+        }
+      },
+      "HiTLThread": {
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id"
+          },
+          "order_id": {
+            "type": "string",
+            "title": "Order Id"
+          },
+          "item_no": {
+            "type": "string",
+            "title": "Item No"
+          },
+          "agent_id": {
+            "type": "string",
+            "title": "Agent Id"
+          },
+          "priority": {
+            "type": "string",
+            "title": "Priority"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "sla_deadline": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sla Deadline"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "thread_id",
+          "order_id",
+          "item_no",
+          "agent_id",
+          "priority",
+          "status"
+        ],
+        "title": "HiTLThread",
+        "example": {
+          "agent_id": "fusion-agent",
+          "created_at": "2026-04-12T10:30:00Z",
+          "item_no": "1",
+          "order_id": "ORD-2026-04-0042",
+          "priority": "P1",
+          "sla_deadline": "2026-04-12T18:00:00Z",
+          "status": "OPEN",
+          "thread_id": "HITL-20260412-001"
+        }
+      },
+      "ImporterListResponse": {
+        "properties": {
+          "importers": {
+            "items": {
+              "$ref": "#/components/schemas/ImporterProfile"
+            },
+            "type": "array",
+            "title": "Importers"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "importers",
+          "total"
+        ],
+        "title": "ImporterListResponse"
+      },
+      "ImporterProfile": {
+        "properties": {
+          "importer_id": {
+            "type": "string",
+            "title": "Importer Id"
+          },
+          "brand_treatment": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Treatment"
+          },
+          "panel_layouts": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Layouts"
+          },
+          "handling_symbol_rules": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Handling Symbol Rules"
+          },
+          "pi_template_mapping": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pi Template Mapping"
+          },
+          "logo_asset_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logo Asset Hash"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          }
+        },
+        "type": "object",
+        "required": [
+          "importer_id"
+        ],
+        "title": "ImporterProfile",
+        "example": {
+          "brand_treatment": {
+            "company_name": "Acme Trading Co",
+            "font": "Helvetica Neue",
+            "primary_color": "#1A3C6E"
+          },
+          "handling_symbol_rules": {
+            "fragile": true,
+            "keep_dry": false,
+            "this_side_up": true
+          },
+          "importer_id": "IMP-ACME-001",
+          "logo_asset_hash": "sha256:f1e2d3c4b5a6978800112233aabbccdd",
+          "panel_layouts": {
+            "carton_5_panel": "template-5p-v2"
+          },
+          "pi_template_mapping": {
+            "default": "acme-pi-template-v3"
+          },
+          "version": 2
+        }
+      },
+      "ItemState": {
+        "type": "string",
+        "enum": [
+          "CREATED",
+          "INTAKE_CLASSIFIED",
+          "PARSED",
+          "FUSED",
+          "COMPLIANCE_EVAL",
+          "DRAWING_GENERATED",
+          "COMPOSED",
+          "VALIDATED",
+          "REVIEWED",
+          "DELIVERED",
+          "HUMAN_BLOCKED",
+          "FAILED"
+        ],
+        "title": "ItemState"
+      },
+      "LLMSnapshot": {
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "title": "Model Id"
+          },
+          "prompt_hash": {
+            "type": "string",
+            "title": "Prompt Hash"
+          },
+          "temperature": {
+            "type": "number",
+            "title": "Temperature",
+            "default": 0.0
+          },
+          "max_tokens": {
+            "type": "integer",
+            "title": "Max Tokens",
+            "default": 4096
+          }
+        },
+        "type": "object",
+        "required": [
+          "model_id",
+          "prompt_hash"
+        ],
+        "title": "LLMSnapshot",
+        "example": {
+          "max_tokens": 4096,
+          "model_id": "claude-sonnet-4-20250514",
+          "prompt_hash": "sha256:a3f1c9b2e8d74506f1234567890abcdef1234567",
+          "temperature": 0.0
+        }
+      },
+      "Notification": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity"
+          },
+          "order_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Order Id"
+          },
+          "item_no": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item No"
+          },
+          "read": {
+            "type": "boolean",
+            "title": "Read",
+            "default": false
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "title",
+          "message",
+          "severity",
+          "created_at"
+        ],
+        "title": "Notification"
+      },
+      "NotificationListResponse": {
+        "properties": {
+          "notifications": {
+            "items": {
+              "$ref": "#/components/schemas/Notification"
+            },
+            "type": "array",
+            "title": "Notifications"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "unread_count": {
+            "type": "integer",
+            "title": "Unread Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "notifications",
+          "total",
+          "unread_count"
+        ],
+        "title": "NotificationListResponse"
+      },
+      "OrderDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "importer_id": {
+            "type": "string",
+            "title": "Importer Id"
+          },
+          "po_number": {
+            "type": "string",
+            "title": "Po Number"
+          },
+          "state": {
+            "$ref": "#/components/schemas/OrderState"
+          },
+          "item_count": {
+            "type": "integer",
+            "title": "Item Count"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OrderItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "importer_id",
+          "po_number",
+          "state",
+          "item_count",
+          "created_at",
+          "updated_at",
+          "items"
+        ],
+        "title": "OrderDetail"
+      },
+      "OrderItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "order_id": {
+            "type": "string",
+            "title": "Order Id"
+          },
+          "item_no": {
+            "type": "string",
+            "title": "Item No"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ItemState",
+            "default": "CREATED"
+          },
+          "state_changed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "State Changed At"
+          },
+          "rules_snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rules Snapshot Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "order_id",
+          "item_no"
+        ],
+        "title": "OrderItem",
+        "example": {
+          "id": "OI-20260412-001",
+          "item_no": "1",
+          "order_id": "ORD-2026-04-0042",
+          "rules_snapshot_id": "rules-2026-03-15-v4",
+          "state": "PARSED",
+          "state_changed_at": "2026-04-12T10:45:00Z"
+        }
+      },
+      "OrderListResponse": {
+        "properties": {
+          "orders": {
+            "items": {
+              "$ref": "#/components/schemas/OrderSummary"
+            },
+            "type": "array",
+            "title": "Orders"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "orders",
+          "total"
+        ],
+        "title": "OrderListResponse"
+      },
+      "OrderState": {
+        "type": "string",
+        "enum": [
+          "CREATED",
+          "IN_PROGRESS",
+          "HUMAN_BLOCKED",
+          "ATTENTION",
+          "READY_TO_DELIVER",
+          "DELIVERED"
+        ],
+        "title": "OrderState"
+      },
+      "OrderSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "importer_id": {
+            "type": "string",
+            "title": "Importer Id"
+          },
+          "po_number": {
+            "type": "string",
+            "title": "Po Number"
+          },
+          "state": {
+            "$ref": "#/components/schemas/OrderState"
+          },
+          "item_count": {
+            "type": "integer",
+            "title": "Item Count"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "importer_id",
+          "po_number",
+          "state",
+          "item_count",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "OrderSummary"
+      },
+      "Provenance": {
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "title": "Artifact Id"
+          },
+          "artifact_type": {
+            "type": "string",
+            "title": "Artifact Type"
+          },
+          "content_hash": {
+            "type": "string",
+            "title": "Content Hash"
+          },
+          "llm_snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LLMSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "frozen_inputs": {
+            "$ref": "#/components/schemas/FrozenInputs"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "artifact_id",
+          "artifact_type",
+          "content_hash",
+          "frozen_inputs"
+        ],
+        "title": "Provenance",
+        "example": {
+          "artifact_id": "diecut-item1-v3",
+          "artifact_type": "die_cut_svg",
+          "content_hash": "sha256:e7f8a9b0c1d2e3f4567890abcdef1234",
+          "created_at": "2026-04-12T10:30:00Z",
+          "frozen_inputs": {
+            "asset_hashes": {
+              "logo.svg": "sha256:b4d3f1a2c5e6789012345abcdef67890"
+            },
+            "code_sha": "abc1234def5678",
+            "profile_version": 2,
+            "rules_snapshot_id": "rules-2026-03-15-v4"
+          },
+          "llm_snapshot": {
+            "max_tokens": 4096,
+            "model_id": "claude-sonnet-4-20250514",
+            "prompt_hash": "sha256:a3f1c9b2e8d74506f1234567890abcdef1234567",
+            "temperature": 0.0
+          }
+        }
+      },
+      "RuleListResponse": {
+        "properties": {
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/ComplianceRule"
+            },
+            "type": "array",
+            "title": "Rules"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rules",
+          "total"
+        ],
+        "title": "RuleListResponse"
+      },
+      "ThreadDetailResponse": {
+        "properties": {
+          "thread": {
+            "$ref": "#/components/schemas/HiTLThread"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/HiTLMessage"
+            },
+            "type": "array",
+            "title": "Messages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "thread",
+          "messages"
+        ],
+        "title": "ThreadDetailResponse"
+      },
+      "ThreadListResponse": {
+        "properties": {
+          "threads": {
+            "items": {
+              "$ref": "#/components/schemas/HiTLThread"
+            },
+            "type": "array",
+            "title": "Threads"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "threads",
+          "total"
+        ],
+        "title": "ThreadListResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WarningLabel": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "region": {
+            "type": "string",
+            "title": "Region"
+          },
+          "placement": {
+            "type": "string",
+            "title": "Placement"
+          },
+          "icon_asset_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon Asset Hash"
+          },
+          "active": {
+            "type": "boolean",
+            "title": "Active",
+            "default": true
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "code",
+          "title",
+          "text",
+          "region",
+          "placement",
+          "updated_at"
+        ],
+        "title": "WarningLabel"
+      },
+      "WarningLabelListResponse": {
+        "properties": {
+          "warning_labels": {
+            "items": {
+              "$ref": "#/components/schemas/WarningLabel"
+            },
+            "type": "array",
+            "title": "Warning Labels"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "warning_labels",
+          "total"
+        ],
+        "title": "WarningLabelListResponse"
+      }
+    }
+  }
+}
