@@ -452,7 +452,15 @@ def generate():
     return svg
 
 
-with open("/sessions/zealous-charming-bohr/mnt/Printing and Labeling/System_Architecture_Diagram.svg", "w") as f:
-    f.write(generate())
+def main():
+    import os
+    output_dir = os.environ.get("LABELFORGE_OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "..", "outputs", "docs"))
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "System_Architecture_Diagram.svg")
+    with open(output_path, "w") as f:
+        f.write(generate())
+    print("Architecture diagram generated successfully.")
 
-print("Architecture diagram generated successfully.")
+
+if __name__ == '__main__':
+    main()

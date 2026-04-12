@@ -32,7 +32,7 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-OUTPUT_DIR = "/sessions/zealous-charming-bohr/mnt/Printing and Labeling"
+OUTPUT_DIR = os.environ.get("LABELFORGE_OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "..", "outputs", "docs"))
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "Export_Labeling_Automation_Solution_Design.pdf")
 
 # ── Color palette ─────────────────────────────────────────────────────────
@@ -1901,15 +1901,20 @@ class SolutionDoc(BaseDocTemplate):
 
 
 # Add a page break at the start to switch from cover to body template
-doc_story = [
-    NextPageTemplate('body'),
-    PageBreak(),
-]
-doc_story.extend(story)
+def main():
+    doc_story = [
+        NextPageTemplate('body'),
+        PageBreak(),
+    ]
+    doc_story.extend(story)
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-doc = SolutionDoc(OUTPUT_FILE)
-doc.build(doc_story)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    doc = SolutionDoc(OUTPUT_FILE)
+    doc.build(doc_story)
 
-print(f"✓ Generated: {OUTPUT_FILE}")
-print(f"  Size: {os.path.getsize(OUTPUT_FILE) / 1024:.1f} KB")
+    print(f"✓ Generated: {OUTPUT_FILE}")
+    print(f"  Size: {os.path.getsize(OUTPUT_FILE) / 1024:.1f} KB")
+
+
+if __name__ == '__main__':
+    main()

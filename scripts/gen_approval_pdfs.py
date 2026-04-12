@@ -17,8 +17,8 @@ from reportlab.lib.colors import Color, black, white, red
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 
-OUTPUT_DIR = "/sessions/zealous-charming-bohr/mnt/Printing and Labeling"
-ASSETS_DIR = "/sessions/zealous-charming-bohr/extracted_assets"
+OUTPUT_DIR = os.environ.get("LABELFORGE_OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "..", "outputs", "approvals"))
+ASSETS_DIR = os.environ.get("LABELFORGE_ASSETS_DIR", os.path.join(os.path.dirname(__file__), "..", "assets", "extracted"))
 
 # Load actual assets
 HANDLING_IMG = os.path.join(ASSETS_DIR, "warning_p0_img2.jpeg")
@@ -575,14 +575,19 @@ def generate_approval_pdf(item):
 
 
 # ── Generate all PDFs ────────────────────────────────────────────────────
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-for item in items:
-    fn = generate_approval_pdf(item)
-    L, W, H = item['box_L'], item['box_W'], item['box_H']
-    print(f"✓ {fn}")
-    print(f"  {item['description'][:55]}")
-    print(f"  Box: {L} x {W} x {H}\" | Panels: {L}\"+{W}\"+{L}\"+{W}\" = {2*L+2*W}\"")
-    print()
+    for item in items:
+        fn = generate_approval_pdf(item)
+        L, W, H = item['box_L'], item['box_W'], item['box_H']
+        print(f"✓ {fn}")
+        print(f"  {item['description'][:55]}")
+        print(f"  Box: {L} x {W} x {H}\" | Panels: {L}\"+{W}\"+{L}\"+{W}\" = {2*L+2*W}\"")
+        print()
 
-print(f"All {len(items)} approval PDFs generated in: {OUTPUT_DIR}")
+    print(f"All {len(items)} approval PDFs generated in: {OUTPUT_DIR}")
+
+
+if __name__ == '__main__':
+    main()

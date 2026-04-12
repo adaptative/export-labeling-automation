@@ -12,8 +12,8 @@ All dimensions in mm (1 inch = 25.4 mm).
 
 import os, math, base64
 
-OUTPUT_DIR = "/sessions/zealous-charming-bohr/mnt/Printing and Labeling"
-ASSETS_DIR = "/sessions/zealous-charming-bohr/extracted_assets"
+OUTPUT_DIR = os.environ.get("LABELFORGE_OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "..", "outputs", "diecuts"))
+ASSETS_DIR = os.environ.get("LABELFORGE_ASSETS_DIR", os.path.join(os.path.dirname(__file__), "..", "assets", "extracted"))
 IN = 25.4
 FLAP_DEPTH = 3.0 * IN
 STROKE_W = 0.5
@@ -29,9 +29,21 @@ def load_image_b64(filename):
     mime = 'image/jpeg' if ext in ('.jpg', '.jpeg') else 'image/png'
     return f"data:{mime};base64,{data}"
 
-# Pre-load the actual handling symbols and brand logo
-HANDLING_SYMBOLS_B64 = load_image_b64("warning_p0_img2.jpeg")   # 537×202px — 3 ISO symbols
-BRAND_LOGO_B64 = load_image_b64("protocol_p0_img1.jpeg")        # 2000×500px — SH Sagebrook Home logo
+# Lazy-load the actual handling symbols and brand logo
+_HANDLING_SYMBOLS_B64 = None
+_BRAND_LOGO_B64 = None
+
+def get_handling_symbols_b64():
+    global _HANDLING_SYMBOLS_B64
+    if _HANDLING_SYMBOLS_B64 is None:
+        _HANDLING_SYMBOLS_B64 = load_image_b64("warning_p0_img2.jpeg")
+    return _HANDLING_SYMBOLS_B64
+
+def get_brand_logo_b64():
+    global _BRAND_LOGO_B64
+    if _BRAND_LOGO_B64 is None:
+        _BRAND_LOGO_B64 = load_image_b64("protocol_p0_img1.jpeg")
+    return _BRAND_LOGO_B64
 
 # ── UPC-A Barcode Generator ───────────────────────────────────────────────
 UPC_ENCODING = {
@@ -82,7 +94,7 @@ def handling_symbols_block(x, y, sym_size=20):
     We scale to fit: width = sym_size * 3.2, height proportional."""
     w = sym_size * 3.2
     h = w * (202 / 537)  # maintain aspect ratio
-    return f'<image x="{x}" y="{y}" width="{w}" height="{h}" xlink:href="{HANDLING_SYMBOLS_B64}" href="{HANDLING_SYMBOLS_B64}" preserveAspectRatio="xMidYMid meet"/>\n'
+    return f'<image x="{x}" y="{y}" width="{w}" height="{h}" xlink:href="{get_handling_symbols_b64()}" href="{get_handling_symbols_b64()}" preserveAspectRatio="xMidYMid meet"/>\n'
 
 
 # ── Product Line Drawings ─────────────────────────────────────────────────
@@ -290,7 +302,7 @@ def brand_block(cx, y, scale=1.0):
     logo_h = logo_w * (500 / 2000)  # maintain aspect ratio
     logo_x = cx - logo_w / 2
     logo_y = y - logo_h * 0.7  # offset so vertical center aligns near y
-    return f'<image x="{logo_x}" y="{logo_y}" width="{logo_w}" height="{logo_h}" xlink:href="{BRAND_LOGO_B64}" href="{BRAND_LOGO_B64}" preserveAspectRatio="xMidYMid meet"/>\n'
+    return f'<image x="{logo_x}" y="{logo_y}" width="{logo_w}" height="{logo_h}" xlink:href="{get_brand_logo_b64()}" href="{get_brand_logo_b64()}" preserveAspectRatio="xMidYMid meet"/>\n'
 
 
 def long_panel(item, cx, top, pw, ph, show_ann=True):
@@ -444,22 +456,27 @@ def generate_diecut(item):
 
 
 # ── Generate all SVGs ─────────────────────────────────────────────────────
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-for item in items:
-    svg = generate_diecut(item)
-    fn = f"DieCut_v2_{item['item_no']}.svg"
-    fp = os.path.join(OUTPUT_DIR, fn)
-    with open(fp, 'w') as f:
-        f.write(svg)
+    for item in items:
+        svg = generate_diecut(item)
+        fn = f"DieCut_v2_{item['item_no']}.svg"
+        fp = os.path.join(OUTPUT_DIR, fn)
+        with open(fp, 'w') as f:
+            f.write(svg)
 
-    L, W, H = item['box_L']*IN, item['box_W']*IN, item['box_H']*IN
-    tw = 2*L + 2*W
-    th = FLAP_DEPTH + H + FLAP_DEPTH
-    print(f"✓ {fn}")
-    print(f"  {item['description'][:50]}...")
-    print(f"  Box: {item['box_L']}×{item['box_W']}×{item['box_H']}\" | SVG: {tw:.0f}×{th:.0f}mm ({tw/IN:.1f}\"×{th/IN:.1f}\")")
-    print(f"  UPC: {item['upc']} | Cartons: {item['total_cartons']} | Drawing: {item['drawing']}")
-    print()
+        L, W, H = item['box_L']*IN, item['box_W']*IN, item['box_H']*IN
+        tw = 2*L + 2*W
+        th = FLAP_DEPTH + H + FLAP_DEPTH
+        print(f"✓ {fn}")
+        print(f"  {item['description'][:50]}...")
+        print(f"  Box: {item['box_L']}×{item['box_W']}×{item['box_H']}\" | SVG: {tw:.0f}×{th:.0f}mm ({tw/IN:.1f}\"×{th/IN:.1f}\")")
+        print(f"  UPC: {item['upc']} | Cartons: {item['total_cartons']} | Drawing: {item['drawing']}")
+        print()
 
-print(f"All {len(items)} SVG files generated in: {OUTPUT_DIR}")
+    print(f"All {len(items)} SVG files generated in: {OUTPUT_DIR}")
+
+
+if __name__ == '__main__':
+    main()
