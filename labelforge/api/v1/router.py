@@ -7,6 +7,7 @@ from labelforge.api.v1 import (
     admin,
     artifacts,
     auth,
+    budgets,
     documents,
     hitl,
     importers,
@@ -22,6 +23,7 @@ api_router = APIRouter()
 
 api_router.include_router(admin.router)
 api_router.include_router(auth.router)
+api_router.include_router(budgets.router)
 api_router.include_router(orders.router)
 api_router.include_router(items.router)
 api_router.include_router(documents.router)
