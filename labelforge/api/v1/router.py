@@ -5,6 +5,7 @@ from fastapi import APIRouter
 
 from labelforge.api.v1 import (
     artifacts,
+    auth,
     documents,
     hitl,
     importers,
@@ -17,6 +18,7 @@ from labelforge.api.v1 import (
 
 api_router = APIRouter()
 
+api_router.include_router(auth.router)
 api_router.include_router(orders.router)
 api_router.include_router(items.router)
 api_router.include_router(documents.router)
