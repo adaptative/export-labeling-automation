@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from labelforge.api.v1 import (
+    admin,
     artifacts,
     auth,
     documents,
@@ -13,11 +14,13 @@ from labelforge.api.v1 import (
     notifications,
     orders,
     rules,
+    settings,
     warning_labels,
 )
 
 api_router = APIRouter()
 
+api_router.include_router(admin.router)
 api_router.include_router(auth.router)
 api_router.include_router(orders.router)
 api_router.include_router(items.router)
@@ -27,6 +30,7 @@ api_router.include_router(rules.router)
 api_router.include_router(importers.router)
 api_router.include_router(artifacts.router)
 api_router.include_router(notifications.router)
+api_router.include_router(settings.router)
 api_router.include_router(warning_labels.router)
 
 
