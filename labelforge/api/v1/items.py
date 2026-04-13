@@ -4,9 +4,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import OrderItem, ItemState
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/items", tags=["items"])
 
@@ -59,6 +61,7 @@ async def list_items(
     order_id: Optional[str] = Query(None, description="Filter by order ID"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> list[OrderItem]:
     """List all items with optional filtering."""
     results = _MOCK_ITEMS
@@ -70,7 +73,7 @@ async def list_items(
 
 
 @router.get("/{item_id}", response_model=OrderItem)
-async def get_item(item_id: str) -> OrderItem:
+async def get_item(item_id: str, _user: TokenPayload = Depends(get_current_user)) -> OrderItem:
     """Get a single item by ID."""
     item = next((i for i in _MOCK_ITEMS if i.id == item_id), None)
     if item is None:

@@ -3,9 +3,13 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from labelforge.api.v1.auth import _make_stub_jwt
 from labelforge.app import app
 
 client = TestClient(app)
+
+_TOKEN = _make_stub_jwt("usr-admin-001", "tnt-nakoda-001", "ADMIN", "admin@nakodacraft.com")
+_AUTH = {"Authorization": f"Bearer {_TOKEN}"}
 
 
 class TestLogin:
@@ -66,11 +70,15 @@ class TestLogin:
 
 class TestRefresh:
     def test_refresh_returns_new_token(self):
-        resp = client.post("/api/v1/auth/refresh")
+        resp = client.post("/api/v1/auth/refresh", headers=_AUTH)
         assert resp.status_code == 200
         data = resp.json()
         assert "access_token" in data
         assert data["expires_in"] > 0
+
+    def test_refresh_rejects_without_token(self):
+        resp = client.post("/api/v1/auth/refresh")
+        assert resp.status_code == 401
 
 
 class TestLogout:
@@ -110,12 +118,16 @@ class TestSAML:
 
 class TestMe:
     def test_get_current_user(self):
-        resp = client.get("/api/v1/auth/me")
+        resp = client.get("/api/v1/auth/me", headers=_AUTH)
         assert resp.status_code == 200
         data = resp.json()
-        assert "user_id" in data
-        assert "email" in data
-        assert "role" in data
+        assert data["user_id"] == "usr-admin-001"
+        assert data["email"] == "admin@nakodacraft.com"
+        assert data["role"] == "ADMIN"
+
+    def test_me_rejects_without_token(self):
+        resp = client.get("/api/v1/auth/me")
+        assert resp.status_code == 401
 
 
 class TestAuthPaths:

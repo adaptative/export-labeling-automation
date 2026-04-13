@@ -4,10 +4,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Query, UploadFile, File
+from fastapi import APIRouter, Depends, Query, UploadFile, File
 from pydantic import BaseModel, Field
 
+from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import DocumentClass
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -93,6 +95,7 @@ async def list_documents(
     doc_class: Optional[DocumentClass] = Query(None, description="Filter by document class"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> DocumentListResponse:
     """List documents with optional filtering."""
     results = _MOCK_DOCS
@@ -110,6 +113,7 @@ async def list_documents(
 async def upload_document(
     order_id: str = Query(..., description="Order to attach document to"),
     file: UploadFile = File(...),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> DocumentUploadResponse:
     """Upload a document and classify it."""
     filename = file.filename or "unnamed.pdf"

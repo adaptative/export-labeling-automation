@@ -4,10 +4,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import Provenance, FrozenInputs, LLMSnapshot
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 
@@ -189,6 +191,7 @@ async def list_artifacts(
     order_id: Optional[str] = Query(None, description="Filter by order ID"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> ArtifactListResponse:
     """List provenance artifacts with optional filtering."""
     results = list(_MOCK_ARTIFACTS)
@@ -212,7 +215,7 @@ async def list_artifacts(
 
 
 @router.get("/{artifact_id}", response_model=ArtifactDetail)
-async def get_artifact(artifact_id: str) -> ArtifactDetail:
+async def get_artifact(artifact_id: str, _user: TokenPayload = Depends(get_current_user)) -> ArtifactDetail:
     """Get detailed artifact information."""
     detail = _MOCK_DETAILS.get(artifact_id)
     if not detail:
@@ -221,7 +224,7 @@ async def get_artifact(artifact_id: str) -> ArtifactDetail:
 
 
 @router.get("/{artifact_id}/provenance", response_model=ProvenanceChainResponse)
-async def get_artifact_provenance(artifact_id: str) -> ProvenanceChainResponse:
+async def get_artifact_provenance(artifact_id: str, _user: TokenPayload = Depends(get_current_user)) -> ProvenanceChainResponse:
     """Get provenance chain for an artifact."""
     steps = _MOCK_PROVENANCE.get(artifact_id)
     if steps is None:
@@ -230,7 +233,7 @@ async def get_artifact_provenance(artifact_id: str) -> ProvenanceChainResponse:
 
 
 @router.get("/{artifact_id}/download", response_model=DownloadResponse)
-async def download_artifact(artifact_id: str) -> DownloadResponse:
+async def download_artifact(artifact_id: str, _user: TokenPayload = Depends(get_current_user)) -> DownloadResponse:
     """Get download URL for an artifact."""
     detail = _MOCK_DETAILS.get(artifact_id)
     if not detail:

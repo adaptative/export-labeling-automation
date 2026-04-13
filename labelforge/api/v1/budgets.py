@@ -4,8 +4,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+
+from labelforge.api.v1.auth import get_current_user
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/budgets", tags=["budgets"])
 
@@ -116,7 +119,7 @@ _EVENTS: List[BreakerEvent] = [
 
 
 @router.get("/current-spend", response_model=CurrentSpendResponse)
-async def get_current_spend() -> CurrentSpendResponse:
+async def get_current_spend(_user: TokenPayload = Depends(get_current_user)) -> CurrentSpendResponse:
     """Return current spending across all 4 tiers."""
     return CurrentSpendResponse(tiers=_TIERS)
 
@@ -126,6 +129,7 @@ async def get_breaker_events(
     tier: Optional[str] = Query(None, description="Filter by tier ID"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> BreakerEventsResponse:
     """Return breaker event history with optional tier filter."""
     results = _EVENTS
@@ -144,6 +148,7 @@ async def get_breaker_events(
 async def update_budget_cap(
     tenant_id: str,
     body: UpdateCapRequest,
+    _user: TokenPayload = Depends(get_current_user),
 ) -> UpdateCapResponse:
     """Update budget cap for a specific tier."""
     if body.tier not in VALID_TIERS:

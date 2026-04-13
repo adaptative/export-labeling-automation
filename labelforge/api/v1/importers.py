@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
+from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import ImporterProfile
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/importers", tags=["importers"])
 
@@ -101,6 +103,7 @@ async def list_importers(
     search: Optional[str] = Query(None, description="Search by importer ID"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> ImporterListResponse:
     """List importer profiles with optional search."""
     results = _MOCK_IMPORTERS
@@ -112,7 +115,7 @@ async def list_importers(
 
 
 @router.get("/{importer_id}", response_model=ImporterProfile)
-async def get_importer(importer_id: str) -> ImporterProfile:
+async def get_importer(importer_id: str, _user: TokenPayload = Depends(get_current_user)) -> ImporterProfile:
     """Get a single importer profile by ID."""
     profile = next((p for p in _MOCK_IMPORTERS if p.importer_id == importer_id), None)
     if profile is None:

@@ -5,10 +5,12 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
+from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import HiTLThread, HiTLMessage
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/hitl", tags=["hitl"])
 
@@ -109,6 +111,7 @@ async def list_threads(
     priority: Optional[str] = Query(None, description="Filter by priority: P0, P1, P2"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> ThreadListResponse:
     """List HiTL threads with optional filtering."""
     results = _MOCK_THREADS
@@ -121,7 +124,7 @@ async def list_threads(
 
 
 @router.get("/threads/{thread_id}", response_model=ThreadDetailResponse)
-async def get_thread(thread_id: str) -> ThreadDetailResponse:
+async def get_thread(thread_id: str, _user: TokenPayload = Depends(get_current_user)) -> ThreadDetailResponse:
     """Get a single HiTL thread with its messages."""
     thread = next((t for t in _MOCK_THREADS if t.thread_id == thread_id), None)
     if thread is None:
@@ -131,7 +134,7 @@ async def get_thread(thread_id: str) -> ThreadDetailResponse:
 
 
 @router.post("/threads/{thread_id}/messages", response_model=HiTLMessage, status_code=201)
-async def add_message(thread_id: str, body: CreateMessageRequest) -> HiTLMessage:
+async def add_message(thread_id: str, body: CreateMessageRequest, _user: TokenPayload = Depends(get_current_user)) -> HiTLMessage:
     """Add a message to a HiTL thread."""
     return HiTLMessage(
         message_id=f"msg-{uuid4().hex[:8]}",

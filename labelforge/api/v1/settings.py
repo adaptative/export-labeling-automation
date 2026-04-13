@@ -5,10 +5,11 @@ import hashlib
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from labelforge.core.auth import log_auth_event
+from labelforge.api.v1.auth import get_current_user
+from labelforge.core.auth import TokenPayload, log_auth_event
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -77,16 +78,13 @@ _MFA_SECRET = "JBSWY3DPEHPK3PXP"  # Stub TOTP secret
 
 
 @router.get("/profile", response_model=ProfileResponse)
-async def get_profile() -> ProfileResponse:
-    """Get the current user's profile.
-
-    Stub: returns the admin user profile.
-    """
+async def get_profile(_user: TokenPayload = Depends(get_current_user)) -> ProfileResponse:
+    """Get the current user's profile."""
     return ProfileResponse(**_STUB_PROFILE)
 
 
 @router.patch("/profile", response_model=ProfileResponse)
-async def update_profile(req: UpdateProfileRequest) -> ProfileResponse:
+async def update_profile(req: UpdateProfileRequest, _user: TokenPayload = Depends(get_current_user)) -> ProfileResponse:
     """Update the current user's profile."""
     if req.display_name is not None:
         _STUB_PROFILE["display_name"] = req.display_name
@@ -103,7 +101,7 @@ async def update_profile(req: UpdateProfileRequest) -> ProfileResponse:
 
 
 @router.post("/password")
-async def change_password(req: ChangePasswordRequest) -> dict:
+async def change_password(req: ChangePasswordRequest, _user: TokenPayload = Depends(get_current_user)) -> dict:
     """Change the current user's password."""
     global _STUB_PASSWORD_HASH
 
@@ -121,13 +119,13 @@ async def change_password(req: ChangePasswordRequest) -> dict:
 
 
 @router.get("/mfa", response_model=MFAStatusResponse)
-async def get_mfa_status() -> MFAStatusResponse:
+async def get_mfa_status(_user: TokenPayload = Depends(get_current_user)) -> MFAStatusResponse:
     """Get MFA status for the current user."""
     return MFAStatusResponse(enabled=_MFA_ENABLED, method=_MFA_METHOD)
 
 
 @router.post("/mfa/enable", response_model=EnableMFAResponse)
-async def enable_mfa(req: EnableMFARequest) -> EnableMFAResponse:
+async def enable_mfa(req: EnableMFARequest, _user: TokenPayload = Depends(get_current_user)) -> EnableMFAResponse:
     """Enable MFA — returns a TOTP secret and QR URI for setup."""
     if _MFA_ENABLED:
         raise HTTPException(status_code=400, detail="MFA is already enabled")
@@ -147,7 +145,7 @@ async def enable_mfa(req: EnableMFARequest) -> EnableMFAResponse:
 
 
 @router.post("/mfa/verify")
-async def verify_mfa(req: VerifyMFARequest) -> dict:
+async def verify_mfa(req: VerifyMFARequest, _user: TokenPayload = Depends(get_current_user)) -> dict:
     """Verify MFA code and finalize MFA enrollment."""
     global _MFA_ENABLED, _MFA_METHOD
 
@@ -163,7 +161,7 @@ async def verify_mfa(req: VerifyMFARequest) -> dict:
 
 
 @router.post("/mfa/disable")
-async def disable_mfa() -> dict:
+async def disable_mfa(_user: TokenPayload = Depends(get_current_user)) -> dict:
     """Disable MFA for the current user."""
     global _MFA_ENABLED, _MFA_METHOD
 

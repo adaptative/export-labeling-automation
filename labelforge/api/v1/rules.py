@@ -4,8 +4,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
+
+from labelforge.api.v1.auth import get_current_user
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/rules", tags=["rules"])
 
@@ -101,6 +104,7 @@ async def list_rules(
     active: Optional[bool] = Query(None, description="Filter by active status"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> RuleListResponse:
     """List compliance rules with optional filtering."""
     results = _MOCK_RULES
@@ -115,7 +119,7 @@ async def list_rules(
 
 
 @router.get("/{rule_id}", response_model=ComplianceRule)
-async def get_rule(rule_id: str) -> ComplianceRule:
+async def get_rule(rule_id: str, _user: TokenPayload = Depends(get_current_user)) -> ComplianceRule:
     """Get a single compliance rule by ID."""
     rule = next((r for r in _MOCK_RULES if r.id == rule_id), None)
     if rule is None:
