@@ -9,6 +9,7 @@ from labelforge.api.v1 import (
     audit_log,
     auth,
     budgets,
+    dashboard,
     documents,
     hitl,
     importers,
@@ -26,6 +27,7 @@ api_router.include_router(admin.router)
 api_router.include_router(audit_log.router)
 api_router.include_router(auth.router)
 api_router.include_router(budgets.router)
+api_router.include_router(dashboard.router)
 api_router.include_router(orders.router)
 api_router.include_router(items.router)
 api_router.include_router(documents.router)

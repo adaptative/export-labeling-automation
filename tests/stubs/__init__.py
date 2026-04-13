@@ -152,6 +152,9 @@ class StubDB:
             "actual": actual,
         })
 
+    async def list_artifact_ids(self) -> list:
+        return list(self._artifacts.keys())
+
 
 class StubProvenance:
     """Provenance emitter stub that computes sha256 without storage.
