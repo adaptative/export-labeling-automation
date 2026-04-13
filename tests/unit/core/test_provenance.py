@@ -100,7 +100,7 @@ class TestEmit:
     @pytest.mark.asyncio
     async def test_with_llm_snapshot(self, emitter, db_session):
         content = b"with snapshot"
-        snapshot = {"model": "claude-sonnet-4-20250514", "temperature": 0.0}
+        snapshot = {"model": "gpt-5.4", "temperature": 0.0}
         record = await emitter.emit("label_pdf", content, llm_snapshot=snapshot)
         assert record.provenance["llm_snapshot"] == snapshot
 

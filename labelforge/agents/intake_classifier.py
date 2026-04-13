@@ -1,5 +1,6 @@
 """Intake Classifier Agent (Agent 6.1)."""
 from labelforge.agents.base import BaseAgent, AgentResult
+from labelforge.config import settings
 
 CONFIDENCE_HITL_THRESHOLD = 0.70
 
@@ -14,7 +15,7 @@ class IntakeClassifierAgent(BaseAgent):
         doc_content = input_data.get("document_content", "")
         result = await self.llm.complete(
             f"Classify this document: {doc_content[:500]}",
-            model_id="claude-sonnet-4-20250514",
+            model_id=settings.llm_default_model,
         )
         classification = self._parse_classification(result.content)
         confidence = classification.get("confidence", 0.0)

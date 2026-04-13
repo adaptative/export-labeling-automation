@@ -7,9 +7,10 @@ from labelforge.core.llm import (
     TOKEN_PRICING,
     CompletionCache,
     CompletionResult,
-    ClaudeProvider,
     FallbackProvider,
     LLMProvider,
+    OpenAIProvider,
+    StubProvider,
     cache_key,
     estimate_cost,
     get_default_cache,
@@ -27,20 +28,20 @@ class TestTokenPricing:
             assert pricing["input"] > 0
             assert pricing["output"] > 0
 
-    def test_claude_sonnet_pricing(self):
-        p = TOKEN_PRICING["claude-sonnet-4-20250514"]
-        assert p["input"] == 0.003
+    def test_gpt54_pricing(self):
+        p = TOKEN_PRICING["gpt-5.4"]
+        assert p["input"] == 0.005
         assert p["output"] == 0.015
 
 
 class TestEstimateCost:
     def test_basic_cost_calculation(self):
-        cost = estimate_cost("claude-sonnet-4-20250514", 1000, 500)
-        expected = (1000 / 1000 * 0.003) + (500 / 1000 * 0.015)
+        cost = estimate_cost("gpt-5.4", 1000, 500)
+        expected = (1000 / 1000 * 0.005) + (500 / 1000 * 0.015)
         assert cost == round(expected, 6)
 
     def test_zero_tokens(self):
-        cost = estimate_cost("claude-sonnet-4-20250514", 0, 0)
+        cost = estimate_cost("gpt-5.4", 0, 0)
         assert cost == 0.0
 
     def test_unknown_model_returns_zero(self):
@@ -48,14 +49,14 @@ class TestEstimateCost:
         assert cost == 0.0
 
     def test_cost_increases_with_tokens(self):
-        c1 = estimate_cost("claude-sonnet-4-20250514", 100, 100)
-        c2 = estimate_cost("claude-sonnet-4-20250514", 1000, 1000)
+        c1 = estimate_cost("gpt-5.4", 100, 100)
+        c2 = estimate_cost("gpt-5.4", 1000, 1000)
         assert c2 > c1
 
-    def test_opus_more_expensive_than_haiku(self):
-        opus = estimate_cost("claude-opus-4-20250514", 1000, 1000)
-        haiku = estimate_cost("claude-haiku-4-20250514", 1000, 1000)
-        assert opus > haiku
+    def test_gpt4o_vs_mini_pricing(self):
+        full = estimate_cost("gpt-4o", 1000, 1000)
+        mini = estimate_cost("gpt-4o-mini", 1000, 1000)
+        assert full > mini
 
 
 class TestCompletionResult:
@@ -155,42 +156,71 @@ class TestCompletionCache:
         assert c1 is c2
 
 
-class TestClaudeProvider:
+class TestOpenAIProvider:
+    def test_requires_api_key(self):
+        with pytest.raises(ValueError, match="API key is required"):
+            OpenAIProvider(api_key="")
+
+    def test_provider_name(self):
+        provider = OpenAIProvider(api_key="sk-test-key")
+        assert provider.name == "openai"
+
+    def test_is_llm_provider(self):
+        assert isinstance(OpenAIProvider(api_key="sk-test"), LLMProvider)
+
+
+class TestStubProvider:
     @pytest.mark.asyncio
     async def test_complete_returns_result(self):
-        provider = ClaudeProvider(api_key="test-key")
+        provider = StubProvider()
         result = await provider.complete(
-            model="claude-sonnet-4-20250514",
+            model="gpt-5.4",
             messages=[{"role": "user", "content": "Hello world"}],
         )
         assert isinstance(result, CompletionResult)
-        assert result.model == "claude-sonnet-4-20250514"
-        assert result.provider == "claude"
+        assert result.model == "gpt-5.4"
+        assert result.provider == "stub"
         assert result.input_tokens > 0
         assert result.output_tokens > 0
-        assert result.cost_usd > 0
         assert result.latency_ms >= 0
 
     @pytest.mark.asyncio
     async def test_complete_with_cache(self):
-        provider = ClaudeProvider()
+        provider = StubProvider()
         cache = CompletionCache()
         msgs = [{"role": "user", "content": "cached test"}]
 
-        r1 = await provider.complete_with_cache("claude-sonnet-4-20250514", msgs, cache=cache)
+        r1 = await provider.complete_with_cache("gpt-5.4", msgs, cache=cache)
         assert r1.cached is False
         assert cache.hits == 0
 
-        r2 = await provider.complete_with_cache("claude-sonnet-4-20250514", msgs, cache=cache)
+        r2 = await provider.complete_with_cache("gpt-5.4", msgs, cache=cache)
         assert r2.cached is True
         assert r2.cost_usd == 0.0
         assert cache.hits == 1
 
+    @pytest.mark.asyncio
+    async def test_set_response(self):
+        provider = StubProvider()
+        provider.set_response("classify", "PURCHASE_ORDER")
+        result = await provider.complete(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "classify this document"}],
+        )
+        assert result.content == "PURCHASE_ORDER"
+
+    @pytest.mark.asyncio
+    async def test_tracks_calls(self):
+        provider = StubProvider()
+        await provider.complete("gpt-5.4", [{"role": "user", "content": "test"}])
+        assert len(provider.calls) == 1
+        assert provider.calls[0]["model"] == "gpt-5.4"
+
     def test_provider_name(self):
-        assert ClaudeProvider().name == "claude"
+        assert StubProvider().name == "stub"
 
     def test_is_llm_provider(self):
-        assert isinstance(ClaudeProvider(), LLMProvider)
+        assert isinstance(StubProvider(), LLMProvider)
 
 
 class TestFallbackProvider:
@@ -199,17 +229,17 @@ class TestFallbackProvider:
             FallbackProvider(providers=[])
 
     def test_name(self):
-        fb = FallbackProvider(providers=[ClaudeProvider()])
+        fb = FallbackProvider(providers=[StubProvider()])
         assert fb.name == "fallback"
 
     @pytest.mark.asyncio
     async def test_uses_first_provider(self):
-        fb = FallbackProvider(providers=[ClaudeProvider()])
+        fb = FallbackProvider(providers=[StubProvider()])
         result = await fb.complete(
-            "claude-sonnet-4-20250514",
+            "gpt-5.4",
             [{"role": "user", "content": "test"}],
         )
-        assert result.provider == "claude"
+        assert result.provider == "stub"
 
     @pytest.mark.asyncio
     async def test_fallback_on_failure(self):
@@ -221,12 +251,12 @@ class TestFallbackProvider:
             async def complete(self, model, messages, **kwargs):
                 raise RuntimeError("intentional failure")
 
-        fb = FallbackProvider(providers=[FailProvider(), ClaudeProvider()])
+        fb = FallbackProvider(providers=[FailProvider(), StubProvider()])
         result = await fb.complete(
-            "claude-sonnet-4-20250514",
+            "gpt-5.4",
             [{"role": "user", "content": "test"}],
         )
-        assert result.provider == "claude"
+        assert result.provider == "stub"
 
     @pytest.mark.asyncio
     async def test_all_fail_raises(self):
