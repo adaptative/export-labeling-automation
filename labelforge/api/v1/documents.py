@@ -9,15 +9,21 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import DocumentClass
 from labelforge.core.auth import TokenPayload
 from labelforge.core.blobstore import BlobMeta, MemoryBlobStore
+from labelforge.db.models import Document as DocumentModel, DocumentClassification, Order
+from labelforge.db.session import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +39,7 @@ def get_blob_store() -> MemoryBlobStore:
     return _blob_store
 
 
-# ── In-memory document registry (replaces DB until wired) ────────────────
+# ── In-memory document registry (for BlobStore-backed features) ─────────────
 
 
 class DocumentRecord(BaseModel):
@@ -138,6 +144,64 @@ class DocumentDetailResponse(DocumentResponse):
     content_hash: Optional[str] = None
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _guess_doc_class(filename: str) -> DocumentClass:
+    """Guess document class from filename."""
+    lower = filename.lower()
+    if "po" in lower or "purchase" in lower:
+        return DocumentClass.PURCHASE_ORDER
+    elif "pi" in lower or "proforma" in lower or "invoice" in lower:
+        return DocumentClass.PROFORMA_INVOICE
+    elif "warning" in lower or "label" in lower:
+        return DocumentClass.WARNING_LABELS
+    elif "protocol" in lower:
+        return DocumentClass.PROTOCOL
+    elif "checklist" in lower:
+        return DocumentClass.CHECKLIST
+    return DocumentClass.UNKNOWN
+
+
+def _classify_by_filename(filename: str) -> tuple[str, float]:
+    """Quick filename-based classification heuristic."""
+    lower = filename.lower()
+    if "po" in lower or "purchase" in lower:
+        return DocumentClass.PURCHASE_ORDER.value, 0.60
+    if "pi" in lower or "proforma" in lower or "invoice" in lower:
+        return DocumentClass.PROFORMA_INVOICE.value, 0.60
+    if "protocol" in lower:
+        return DocumentClass.PROTOCOL.value, 0.60
+    if "warning" in lower or "label" in lower:
+        return DocumentClass.WARNING_LABELS.value, 0.55
+    if "checklist" in lower or "check" in lower:
+        return DocumentClass.CHECKLIST.value, 0.55
+    return DocumentClass.UNKNOWN.value, 0.0
+
+
+def _doc_to_response(doc: DocumentModel, classification: Optional[DocumentClassification]) -> DocumentResponse:
+    """Convert a DB document + optional classification to response model."""
+    doc_class = DocumentClass.UNKNOWN
+    confidence = 0.0
+    classification_status = "pending"
+    if classification is not None:
+        doc_class = DocumentClass(classification.doc_class)
+        confidence = classification.confidence or 0.0
+        classification_status = "classified"
+
+    return DocumentResponse(
+        id=doc.id,
+        order_id=doc.order_id,
+        filename=doc.filename,
+        doc_class=doc_class,
+        confidence=confidence,
+        size_bytes=doc.size_bytes or 0,
+        page_count=0,
+        uploaded_at=doc.uploaded_at,
+        classification_status=classification_status,
+    )
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 
@@ -149,34 +213,46 @@ async def list_documents(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> DocumentListResponse:
     """List documents with optional filtering."""
-    results = list(_documents)
-    if order_id:
-        results = [d for d in results if d.order_id == order_id]
-    if doc_class:
-        results = [d for d in results if d.doc_class == doc_class]
-    if classification_status:
-        results = [d for d in results if d.classification_status == classification_status]
-    total = len(results)
-    page = results[offset: offset + limit]
-    return DocumentListResponse(
-        documents=[
-            DocumentResponse(
-                id=d.id,
-                order_id=d.order_id,
-                filename=d.filename,
-                doc_class=d.doc_class,
-                confidence=d.confidence,
-                size_bytes=d.size_bytes,
-                page_count=d.page_count,
-                uploaded_at=d.uploaded_at,
-                classification_status=d.classification_status,
-            )
-            for d in page
-        ],
-        total=total,
+    dc = aliased(DocumentClassification)
+
+    stmt = (
+        select(DocumentModel, dc)
+        .outerjoin(dc, dc.document_id == DocumentModel.id)
+        .where(DocumentModel.tenant_id == _user.tenant_id)
     )
+
+    if order_id:
+        stmt = stmt.where(DocumentModel.order_id == order_id)
+
+    if doc_class is not None:
+        stmt = stmt.where(dc.doc_class == doc_class)
+
+    # Get total count before pagination
+    count_stmt = (
+        select(func.count())
+        .select_from(DocumentModel)
+        .outerjoin(dc, dc.document_id == DocumentModel.id)
+        .where(DocumentModel.tenant_id == _user.tenant_id)
+    )
+    if order_id:
+        count_stmt = count_stmt.where(DocumentModel.order_id == order_id)
+    if doc_class is not None:
+        count_stmt = count_stmt.where(dc.doc_class == doc_class)
+
+    count_result = await db.execute(count_stmt)
+    total = count_result.scalar() or 0
+
+    stmt = stmt.order_by(DocumentModel.uploaded_at.desc()).offset(offset).limit(limit)
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    documents = [_doc_to_response(doc, classification) for doc, classification in rows]
+
+    return DocumentListResponse(documents=documents, total=total)
 
 
 @router.get("/{document_id}", response_model=DocumentDetailResponse)
@@ -208,6 +284,7 @@ async def upload_document(
     order_id: str = Query(..., description="Order to attach document to"),
     file: UploadFile = File(...),
     _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> DocumentUploadResponse:
     """Upload a document, store in BlobStore, and queue classification.
 
@@ -215,6 +292,16 @@ async def upload_document(
     via the Intake Classifier Agent. Poll GET /documents/{id} to check
     classification_status.
     """
+    # Verify order exists
+    order_check = await db.execute(
+        select(Order.id).where(
+            Order.id == order_id,
+            Order.tenant_id == _user.tenant_id,
+        )
+    )
+    if order_check.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
     filename = file.filename or "unnamed.pdf"
     content = await file.read()
     size_bytes = len(content)
@@ -238,8 +325,31 @@ async def upload_document(
     # Quick filename-based classification (real LLM classification is async)
     quick_class, quick_confidence = _classify_by_filename(filename)
 
-    # Create document record
-    doc = DocumentRecord(
+    # Create DB record
+    new_doc = DocumentModel(
+        id=doc_id,
+        tenant_id=_user.tenant_id,
+        order_id=order_id,
+        filename=filename,
+        s3_key=storage_key,
+        size_bytes=size_bytes,
+    )
+    db.add(new_doc)
+
+    # Create initial classification
+    guessed_class = _guess_doc_class(filename)
+    classification = DocumentClassification(
+        id=str(uuid4()),
+        document_id=doc_id,
+        tenant_id=_user.tenant_id,
+        doc_class=guessed_class.value,
+        confidence=quick_confidence,
+    )
+    db.add(classification)
+    await db.commit()
+
+    # Also track in in-memory registry for BlobStore features
+    doc_record = DocumentRecord(
         id=doc_id,
         order_id=order_id,
         filename=filename,
@@ -251,7 +361,7 @@ async def upload_document(
         page_count=0,
         classification_status="pending",
     )
-    _documents.append(doc)
+    _documents.append(doc_record)
 
     logger.info(
         "Document uploaded: id=%s order=%s file=%s size=%d hash=%s",
@@ -355,22 +465,3 @@ async def classify_document(
         uploaded_at=doc.uploaded_at,
         classification_status=doc.classification_status,
     )
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-
-def _classify_by_filename(filename: str) -> tuple[str, float]:
-    """Quick filename-based classification heuristic."""
-    lower = filename.lower()
-    if "po" in lower or "purchase" in lower:
-        return DocumentClass.PURCHASE_ORDER.value, 0.60
-    if "pi" in lower or "proforma" in lower or "invoice" in lower:
-        return DocumentClass.PROFORMA_INVOICE.value, 0.60
-    if "protocol" in lower:
-        return DocumentClass.PROTOCOL.value, 0.60
-    if "warning" in lower or "label" in lower:
-        return DocumentClass.WARNING_LABELS.value, 0.55
-    if "checklist" in lower or "check" in lower:
-        return DocumentClass.CHECKLIST.value, 0.55
-    return DocumentClass.UNKNOWN.value, 0.0

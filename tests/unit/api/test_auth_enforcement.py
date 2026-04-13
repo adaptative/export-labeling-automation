@@ -5,11 +5,6 @@ Covers issue #135: All API endpoints return hardcoded mock data with no auth enf
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
-from labelforge.app import app
-
-client = TestClient(app)
 
 
 # All protected endpoints that must require auth
@@ -63,7 +58,7 @@ class TestNoTokenReturns401:
     """Every protected endpoint must return 401 without an Authorization header."""
 
     @pytest.mark.parametrize("method,path", PROTECTED_ENDPOINTS)
-    def test_unauthenticated_request_rejected(self, method, path):
+    def test_unauthenticated_request_rejected(self, client, method, path):
         if method == "GET":
             resp = client.get(path)
         elif method == "POST":
@@ -82,7 +77,7 @@ class TestInvalidTokenReturns401:
     """Every protected endpoint must return 401 with an invalid JWT."""
 
     @pytest.mark.parametrize("method,path", PROTECTED_ENDPOINTS)
-    def test_invalid_token_rejected(self, method, path):
+    def test_invalid_token_rejected(self, client, method, path):
         headers = {"Authorization": "Bearer invalid.token.here"}
         if method == "GET":
             resp = client.get(path, headers=headers)
@@ -99,15 +94,15 @@ class TestInvalidTokenReturns401:
 
 
 class TestMalformedAuthHeader:
-    def test_missing_bearer_prefix(self):
+    def test_missing_bearer_prefix(self, client):
         resp = client.get("/api/v1/orders", headers={"Authorization": "Token abc"})
         assert resp.status_code == 401
 
-    def test_empty_bearer(self):
+    def test_empty_bearer(self, client):
         resp = client.get("/api/v1/orders", headers={"Authorization": "Bearer "})
         assert resp.status_code == 401
 
-    def test_no_auth_header(self):
+    def test_no_auth_header(self, client):
         resp = client.get("/api/v1/orders")
         assert resp.status_code == 401
 
@@ -115,27 +110,27 @@ class TestMalformedAuthHeader:
 class TestValidTokenAllowsAccess:
     """A valid JWT should allow access to protected endpoints."""
 
-    def test_admin_can_access_orders(self, admin_headers):
+    def test_admin_can_access_orders(self, client, admin_headers):
         resp = client.get("/api/v1/orders", headers=admin_headers)
         assert resp.status_code == 200
 
-    def test_admin_can_access_artifacts(self, admin_headers):
+    def test_admin_can_access_artifacts(self, client, admin_headers):
         resp = client.get("/api/v1/artifacts", headers=admin_headers)
         assert resp.status_code == 200
 
-    def test_admin_can_access_audit_log(self, admin_headers):
+    def test_admin_can_access_audit_log(self, client, admin_headers):
         resp = client.get("/api/v1/audit-log", headers=admin_headers)
         assert resp.status_code == 200
 
-    def test_admin_can_access_budgets(self, admin_headers):
+    def test_admin_can_access_budgets(self, client, admin_headers):
         resp = client.get("/api/v1/budgets/current-spend", headers=admin_headers)
         assert resp.status_code == 200
 
-    def test_admin_can_access_admin_users(self, admin_headers):
+    def test_admin_can_access_admin_users(self, client, admin_headers):
         resp = client.get("/api/v1/admin/users", headers=admin_headers)
         assert resp.status_code == 200
 
-    def test_ops_can_access_orders(self, ops_headers):
+    def test_ops_can_access_orders(self, client, ops_headers):
         resp = client.get("/api/v1/orders", headers=ops_headers)
         assert resp.status_code == 200
 
@@ -143,7 +138,7 @@ class TestValidTokenAllowsAccess:
 class TestAuthMeWithToken:
     """The /auth/me endpoint must return info from the JWT, not hardcoded data."""
 
-    def test_returns_admin_info(self, admin_headers):
+    def test_returns_admin_info(self, client, admin_headers):
         resp = client.get("/api/v1/auth/me", headers=admin_headers)
         assert resp.status_code == 200
         data = resp.json()
@@ -151,7 +146,7 @@ class TestAuthMeWithToken:
         assert data["email"] == "admin@nakodacraft.com"
         assert data["role"] == "ADMIN"
 
-    def test_returns_ops_info(self, ops_headers):
+    def test_returns_ops_info(self, client, ops_headers):
         resp = client.get("/api/v1/auth/me", headers=ops_headers)
         assert resp.status_code == 200
         data = resp.json()
@@ -159,7 +154,7 @@ class TestAuthMeWithToken:
         assert data["email"] == "ops@nakodacraft.com"
         assert data["role"] == "OPS"
 
-    def test_rejects_without_token(self):
+    def test_rejects_without_token(self, client):
         resp = client.get("/api/v1/auth/me")
         assert resp.status_code == 401
 
@@ -167,14 +162,14 @@ class TestAuthMeWithToken:
 class TestAuthRefreshWithToken:
     """The /auth/refresh endpoint must validate the incoming token."""
 
-    def test_refresh_with_valid_token(self, admin_headers):
+    def test_refresh_with_valid_token(self, client, admin_headers):
         resp = client.post("/api/v1/auth/refresh", headers=admin_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert "access_token" in data
         assert data["expires_in"] > 0
 
-    def test_refresh_rejects_without_token(self):
+    def test_refresh_rejects_without_token(self, client):
         resp = client.post("/api/v1/auth/refresh")
         assert resp.status_code == 401
 
@@ -182,28 +177,28 @@ class TestAuthRefreshWithToken:
 class TestLoginStillPublic:
     """Login and other public endpoints must remain accessible without auth."""
 
-    def test_login_endpoint_is_public(self):
+    def test_login_endpoint_is_public(self, client):
         resp = client.post(
             "/api/v1/auth/login",
             json={"email": "admin@nakodacraft.com", "password": "admin123"},
         )
         assert resp.status_code == 200
 
-    def test_login_rejects_invalid_credentials(self):
+    def test_login_rejects_invalid_credentials(self, client):
         resp = client.post(
             "/api/v1/auth/login",
             json={"email": "random@example.com", "password": "random123"},
         )
         assert resp.status_code == 401
 
-    def test_health_check_is_public(self):
+    def test_health_check_is_public(self, client):
         resp = client.get("/health")
         assert resp.status_code == 200
 
-    def test_ping_is_public(self):
+    def test_ping_is_public(self, client):
         resp = client.get("/api/v1/ping")
         assert resp.status_code == 200
 
-    def test_logout_is_public(self):
+    def test_logout_is_public(self, client):
         resp = client.post("/api/v1/auth/logout")
         assert resp.status_code == 200

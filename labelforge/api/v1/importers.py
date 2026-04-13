@@ -3,12 +3,16 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import ImporterProfile
 from labelforge.core.auth import TokenPayload
+from labelforge.db.models import Importer, ImporterProfileModel
+from labelforge.db.session import get_db
 
 router = APIRouter(prefix="/importers", tags=["importers"])
 
@@ -21,78 +25,19 @@ class ImporterListResponse(BaseModel):
     total: int
 
 
-# ── Mock data ────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-_MOCK_IMPORTERS: list[ImporterProfile] = [
-    ImporterProfile(
-        importer_id="IMP-ACME",
-        brand_treatment={
-            "primary_color": "#003DA5",
-            "font_family": "Helvetica Neue",
-            "logo_position": "top-right",
-        },
-        panel_layouts={
-            "carton_top": ["logo", "upc", "item_description"],
-            "carton_side": ["warnings", "country_of_origin", "net_weight"],
-        },
-        handling_symbol_rules={
-            "fragile": True,
-            "this_side_up": True,
-            "keep_dry": False,
-        },
-        pi_template_mapping={
-            "item_no_col": "A",
-            "box_dims_col": "D",
-            "cbm_col": "G",
-        },
-        logo_asset_hash="sha256:a1b2c3d4e5f6",
-        version=3,
-    ),
-    ImporterProfile(
-        importer_id="IMP-GLOBEX",
-        brand_treatment={
-            "primary_color": "#E31837",
-            "font_family": "Arial",
-            "logo_position": "top-left",
-        },
-        panel_layouts={
-            "carton_top": ["logo", "item_description", "upc"],
-            "carton_side": ["net_weight", "warnings", "country_of_origin"],
-        },
-        handling_symbol_rules={
-            "fragile": False,
-            "this_side_up": True,
-            "keep_dry": True,
-        },
-        pi_template_mapping={
-            "item_no_col": "B",
-            "box_dims_col": "E",
-            "cbm_col": "H",
-        },
-        logo_asset_hash="sha256:f6e5d4c3b2a1",
-        version=2,
-    ),
-    ImporterProfile(
-        importer_id="IMP-INITECH",
-        brand_treatment={
-            "primary_color": "#2E8B57",
-            "font_family": "Roboto",
-            "logo_position": "center",
-        },
-        panel_layouts={
-            "carton_top": ["logo", "upc"],
-            "carton_side": ["item_description", "warnings"],
-        },
-        handling_symbol_rules={
-            "fragile": True,
-            "this_side_up": False,
-            "keep_dry": False,
-        },
-        pi_template_mapping=None,
-        logo_asset_hash=None,
-        version=1,
-    ),
-]
+
+def _profile_to_contract(importer: Importer, profile: Optional[ImporterProfileModel]) -> ImporterProfile:
+    return ImporterProfile(
+        importer_id=importer.id,
+        brand_treatment=profile.brand_treatment if profile else None,
+        panel_layouts=profile.panel_layouts if profile else None,
+        handling_symbol_rules=profile.handling_symbol_rules if profile else None,
+        pi_template_mapping=profile.pi_template_mapping if profile else None,
+        logo_asset_hash=profile.logo_asset_hash if profile else None,
+        version=profile.version if profile else 0,
+    )
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -104,20 +49,73 @@ async def list_importers(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> ImporterListResponse:
     """List importer profiles with optional search."""
-    results = _MOCK_IMPORTERS
+    query = select(Importer).where(Importer.tenant_id == _user.tenant_id)
+    count_query = select(func.count()).select_from(Importer).where(Importer.tenant_id == _user.tenant_id)
+
     if search:
-        q = search.lower()
-        results = [p for p in results if q in p.importer_id.lower()]
-    total = len(results)
-    return ImporterListResponse(importers=results[offset : offset + limit], total=total)
+        pattern = f"%{search}%"
+        query = query.where(Importer.name.ilike(pattern) | Importer.code.ilike(pattern))
+        count_query = count_query.where(Importer.name.ilike(pattern) | Importer.code.ilike(pattern))
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar_one()
+
+    query = query.order_by(Importer.name).offset(offset).limit(limit)
+    result = await db.execute(query)
+    importers = result.scalars().all()
+
+    profiles: list[ImporterProfile] = []
+    for importer in importers:
+        # Get latest profile (highest version) for each importer
+        subq = (
+            select(func.max(ImporterProfileModel.version))
+            .where(ImporterProfileModel.importer_id == importer.id)
+            .scalar_subquery()
+        )
+        prof_result = await db.execute(
+            select(ImporterProfileModel).where(
+                ImporterProfileModel.importer_id == importer.id,
+                ImporterProfileModel.version == subq,
+            )
+        )
+        profile = prof_result.scalar_one_or_none()
+        profiles.append(_profile_to_contract(importer, profile))
+
+    return ImporterListResponse(importers=profiles, total=total)
 
 
 @router.get("/{importer_id}", response_model=ImporterProfile)
-async def get_importer(importer_id: str, _user: TokenPayload = Depends(get_current_user)) -> ImporterProfile:
+async def get_importer(
+    importer_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ImporterProfile:
     """Get a single importer profile by ID."""
-    profile = next((p for p in _MOCK_IMPORTERS if p.importer_id == importer_id), None)
-    if profile is None:
-        return _MOCK_IMPORTERS[0]
-    return profile
+    result = await db.execute(
+        select(Importer).where(
+            Importer.id == importer_id,
+            Importer.tenant_id == _user.tenant_id,
+        )
+    )
+    importer = result.scalar_one_or_none()
+    if importer is None:
+        raise HTTPException(status_code=404, detail="Importer not found")
+
+    # Get latest profile
+    subq = (
+        select(func.max(ImporterProfileModel.version))
+        .where(ImporterProfileModel.importer_id == importer.id)
+        .scalar_subquery()
+    )
+    prof_result = await db.execute(
+        select(ImporterProfileModel).where(
+            ImporterProfileModel.importer_id == importer.id,
+            ImporterProfileModel.version == subq,
+        )
+    )
+    profile = prof_result.scalar_one_or_none()
+
+    return _profile_to_contract(importer, profile)

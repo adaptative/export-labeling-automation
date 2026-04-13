@@ -1,30 +1,10 @@
-"""Tests for admin API endpoints — user management and SSO configuration."""
+"""Tests for admin API endpoints --- user management and SSO configuration."""
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
-from labelforge.app import app
-from labelforge.api.v1.admin import _STUB_USERS, _SSO_CONFIG
 
 
-@pytest.fixture(autouse=True)
-def _reset_stub_state():
-    """Reset stub data between tests."""
-    import labelforge.api.v1.admin as admin_mod
-
-    original_users = [dict(u) for u in _STUB_USERS]
-    original_sso = dict(_SSO_CONFIG)
-    original_next_id = admin_mod._next_user_id
-    yield
-    _STUB_USERS.clear()
-    _STUB_USERS.extend(original_users)
-    _SSO_CONFIG.clear()
-    _SSO_CONFIG.update(original_sso)
-    admin_mod._next_user_id = original_next_id
-
-
-# ── User listing ────────────────────────────────────────────────────────────
+# -- User listing ------------------------------------------------------------
 
 
 class TestListUsers:
@@ -58,7 +38,7 @@ class TestListUsers:
         assert "created_at" in user
 
 
-# ── User invitation ─────────────────────────────────────────────────────────
+# -- User invitation ---------------------------------------------------------
 
 
 class TestInviteUser:
@@ -100,7 +80,7 @@ class TestInviteUser:
         assert "listed@example.com" in emails
 
 
-# ── Role update ─────────────────────────────────────────────────────────────
+# -- Role update -------------------------------------------------------------
 
 
 class TestUpdateRole:
@@ -118,7 +98,7 @@ class TestUpdateRole:
         assert resp.status_code == 404
 
 
-# ── Deactivation / Activation ───────────────────────────────────────────────
+# -- Deactivation / Activation -----------------------------------------------
 
 
 class TestDeactivateActivate:
@@ -142,7 +122,7 @@ class TestDeactivateActivate:
         assert resp.status_code == 404
 
 
-# ── SSO configuration ───────────────────────────────────────────────────────
+# -- SSO configuration -------------------------------------------------------
 
 
 class TestSSOConfig:
@@ -171,7 +151,7 @@ class TestSSOConfig:
         assert resp.json()["saml_microsoft_enabled"] is True
 
 
-# ── Schema check ────────────────────────────────────────────────────────────
+# -- Schema check ------------------------------------------------------------
 
 
 class TestAdminSchema:

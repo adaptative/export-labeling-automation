@@ -80,7 +80,7 @@ class TestDocuments:
     def test_upload_document(self):
         resp = client.post(
             "/api/v1/documents/upload",
-            params={"order_id": "ORD-001"},
+            params={"order_id": "ORD-2026-0042"},
             files={"file": ("test-po.pdf", b"fake pdf content", "application/pdf")},
             headers=_AUTH,
         )

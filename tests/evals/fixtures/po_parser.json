@@ -1,0 +1,36 @@
+[
+  {
+    "id": "po-001",
+    "description": "Standard PO with valid UPCs",
+    "input": {
+      "items": [
+        {"item_no": "A1001", "upc": "012345678905", "description": "Wooden Table", "case_qty": 10, "total_qty": 500},
+        {"item_no": "A1002", "upc": "012345678912", "description": "Chair Set", "case_qty": 5, "total_qty": 200}
+      ]
+    },
+    "expected": {"item_count": 2, "min_confidence": 0.85, "needs_hitl": false}
+  },
+  {
+    "id": "po-002",
+    "description": "PO with invalid UPC triggers HiTL",
+    "input": {
+      "items": [
+        {"item_no": "B001", "upc": "111111111111", "description": "Lamp", "case_qty": 5, "total_qty": 100}
+      ]
+    },
+    "expected": {"needs_hitl": true}
+  },
+  {
+    "id": "po-003",
+    "description": "Large PO with many valid line items",
+    "input": {
+      "items": [
+        {"item_no": "C001", "upc": "012345678905", "description": "Widget A", "total_qty": 1000},
+        {"item_no": "C002", "upc": "012345678912", "description": "Widget B", "total_qty": 2000},
+        {"item_no": "C003", "upc": "012345678929", "description": "Widget C", "total_qty": 500},
+        {"item_no": "C004", "upc": "012345678936", "description": "Widget D", "total_qty": 300}
+      ]
+    },
+    "expected": {"item_count": 4, "min_confidence": 0.80}
+  }
+]

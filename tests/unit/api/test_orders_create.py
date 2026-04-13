@@ -1,25 +1,7 @@
-"""Tests for order creation endpoint — Sprint 5."""
+"""Tests for order creation endpoint --- Sprint 5."""
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
-from labelforge.app import app
-
-
-@pytest.fixture(autouse=True)
-def _reset_orders():
-    """Reset order list between tests."""
-    import labelforge.api.v1.orders as orders_mod
-    original = list(orders_mod._MOCK_ORDERS)
-    yield
-    orders_mod._MOCK_ORDERS.clear()
-    orders_mod._MOCK_ORDERS.extend(original)
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 class TestCreateOrder:

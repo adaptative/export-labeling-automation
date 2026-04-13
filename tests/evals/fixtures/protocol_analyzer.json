@@ -1,0 +1,20 @@
+[
+  {
+    "id": "pa-001",
+    "description": "Full protocol with all sections",
+    "input": {"document_content": "PROTOCOL DOCUMENT\nBrand: Blue #003DA5, Helvetica Neue, Logo top-right\nPanels: Top=logo+upc, Side=warnings+origin\nHandling: Fragile=Yes, This Side Up=Yes, Keep Dry=No\nSpecial: UV coating required", "importer_id": "IMP-ACME"},
+    "expected": {"min_confidence": 0.80, "needs_hitl": false}
+  },
+  {
+    "id": "pa-002",
+    "description": "Protocol with annotated photos",
+    "input": {"document_content": "Brand guidelines with photos", "importer_id": "IMP-GLOBEX", "images": ["img1", "img2", "img3"]},
+    "expected": {"min_confidence": 0.80}
+  },
+  {
+    "id": "pa-003",
+    "description": "Incomplete protocol triggers HiTL",
+    "input": {"document_content": "Partial brand info only", "importer_id": "IMP-TEST"},
+    "expected": {"min_confidence": 0.0}
+  }
+]

@@ -6,10 +6,14 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import select, func, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import Provenance, FrozenInputs, LLMSnapshot
 from labelforge.core.auth import TokenPayload
+from labelforge.db.models import Artifact as ArtifactModel, OrderItemModel
+from labelforge.db.session import get_db
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 
@@ -60,125 +64,33 @@ class DownloadResponse(BaseModel):
     size_bytes: int
 
 
-# ── Mock data ────────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
-_MOCK_ARTIFACTS: List[Provenance] = [
-    Provenance(
-        artifact_id="art-001",
-        artifact_type="fused_item",
-        content_hash="sha256:abcdef1234567890",
-        llm_snapshot=LLMSnapshot(
-            model_id="gpt-5.4",
-            prompt_hash="sha256:prompt001",
-            temperature=0.0,
-            max_tokens=4096,
-        ),
-        frozen_inputs=FrozenInputs(
-            profile_version=3,
-            rules_snapshot_id="snap-r1",
-            asset_hashes={"po": "sha256:po001", "pi": "sha256:pi001"},
-            code_sha="abc123def",
-        ),
-        created_at=datetime(2026, 4, 8, 10, 0, 0, tzinfo=timezone.utc),
-    ),
-    Provenance(
-        artifact_id="art-002",
-        artifact_type="compliance_report",
-        content_hash="sha256:fedcba0987654321",
-        llm_snapshot=LLMSnapshot(
-            model_id="gpt-5.4",
-            prompt_hash="sha256:prompt002",
-            temperature=0.0,
-            max_tokens=4096,
-        ),
-        frozen_inputs=FrozenInputs(
-            profile_version=3,
-            rules_snapshot_id="snap-r1",
-            asset_hashes={"fused_item": "sha256:abcdef1234567890"},
-            code_sha="abc123def",
-        ),
-        created_at=datetime(2026, 4, 8, 10, 30, 0, tzinfo=timezone.utc),
-    ),
-    Provenance(
-        artifact_id="art-003",
-        artifact_type="die_cut_svg",
-        content_hash="sha256:1122334455667788",
-        llm_snapshot=None,
-        frozen_inputs=FrozenInputs(
-            profile_version=2,
-            rules_snapshot_id="snap-r2",
-            asset_hashes={"template": "sha256:tmpl001"},
-            code_sha="abc123def",
-        ),
-        created_at=datetime(2026, 4, 9, 8, 0, 0, tzinfo=timezone.utc),
-    ),
-]
 
-_MOCK_DETAILS: Dict[str, ArtifactDetail] = {
-    "art-001": ArtifactDetail(
-        artifact_id="art-001", artifact_type="fused_item",
-        content_hash="sha256:abcdef1234567890",
-        llm_snapshot=_MOCK_ARTIFACTS[0].llm_snapshot,
-        frozen_inputs=_MOCK_ARTIFACTS[0].frozen_inputs,
-        created_at=_MOCK_ARTIFACTS[0].created_at,
-        size_bytes=245_760, mime_type="application/json",
-        storage_key="artifacts/art-001/fused_item.json",
-        order_id="PO-2065", created_by="composer-agent-v3",
-    ),
-    "art-002": ArtifactDetail(
-        artifact_id="art-002", artifact_type="compliance_report",
-        content_hash="sha256:fedcba0987654321",
-        llm_snapshot=_MOCK_ARTIFACTS[1].llm_snapshot,
-        frozen_inputs=_MOCK_ARTIFACTS[1].frozen_inputs,
-        created_at=_MOCK_ARTIFACTS[1].created_at,
-        size_bytes=1_048_576, mime_type="application/pdf",
-        storage_key="artifacts/art-002/compliance_report.pdf",
-        order_id="PO-2065", created_by="validator-agent-v2",
-    ),
-    "art-003": ArtifactDetail(
-        artifact_id="art-003", artifact_type="die_cut_svg",
-        content_hash="sha256:1122334455667788",
-        llm_snapshot=None,
-        frozen_inputs=_MOCK_ARTIFACTS[2].frozen_inputs,
-        created_at=_MOCK_ARTIFACTS[2].created_at,
-        size_bytes=82_944, mime_type="image/svg+xml",
-        storage_key="artifacts/art-003/diecut.svg",
-        order_id="PO-2066", created_by="composer-agent-v3",
-    ),
-}
-
-_MOCK_PROVENANCE: Dict[str, List[ProvenanceStep]] = {
-    "art-001": [
-        ProvenanceStep(step_number=1, agent_id="extractor-agent-v2", model_id="gpt-5.4",
-                       prompt_hash="sha256:ext001", input_hash="sha256:po001",
-                       output_hash="sha256:extracted001", action="extract",
-                       timestamp="2026-04-08T09:30:00Z", duration_ms=4200),
-        ProvenanceStep(step_number=2, agent_id="composer-agent-v3", model_id="gpt-5.4",
-                       prompt_hash="sha256:prompt001", input_hash="sha256:extracted001",
-                       output_hash="sha256:abcdef1234567890", action="compose",
-                       timestamp="2026-04-08T09:45:00Z", duration_ms=8500),
-        ProvenanceStep(step_number=3, agent_id="validator-agent-v2", model_id="gpt-5.4",
-                       prompt_hash="sha256:val001", input_hash="sha256:abcdef1234567890",
-                       output_hash="sha256:abcdef1234567890", action="validate",
-                       timestamp="2026-04-08T10:00:00Z", duration_ms=3100),
-    ],
-    "art-002": [
-        ProvenanceStep(step_number=1, agent_id="validator-agent-v2", model_id="gpt-5.4",
-                       prompt_hash="sha256:prompt002", input_hash="sha256:abcdef1234567890",
-                       output_hash="sha256:fedcba0987654321", action="validate",
-                       timestamp="2026-04-08T10:15:00Z", duration_ms=6200),
-        ProvenanceStep(step_number=2, agent_id="system", model_id=None,
-                       prompt_hash=None, input_hash="sha256:fedcba0987654321",
-                       output_hash="sha256:fedcba0987654321", action="approve",
-                       timestamp="2026-04-08T10:30:00Z", duration_ms=120),
-    ],
-    "art-003": [
-        ProvenanceStep(step_number=1, agent_id="composer-agent-v3", model_id=None,
-                       prompt_hash=None, input_hash="sha256:tmpl001",
-                       output_hash="sha256:1122334455667788", action="compose",
-                       timestamp="2026-04-09T08:00:00Z", duration_ms=2400),
-    ],
-}
+def _to_provenance(a: ArtifactModel) -> Provenance:
+    prov = a.provenance or {}
+    llm = None
+    if prov.get("model_id"):
+        llm = LLMSnapshot(
+            model_id=prov["model_id"],
+            prompt_hash=prov.get("prompt_hash", ""),
+            temperature=prov.get("temperature", 0.0),
+            max_tokens=prov.get("max_tokens", 4096),
+        )
+    frozen = FrozenInputs(
+        profile_version=prov.get("profile_version"),
+        rules_snapshot_id=prov.get("rules_snapshot_id"),
+        asset_hashes=prov.get("asset_hashes", {}),
+        code_sha=prov.get("code_sha"),
+    )
+    return Provenance(
+        artifact_id=a.id,
+        artifact_type=a.artifact_type,
+        content_hash=a.content_hash,
+        llm_snapshot=llm,
+        frozen_inputs=frozen,
+        created_at=a.created_at,
+    )
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -192,57 +104,141 @@ async def list_artifacts(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> ArtifactListResponse:
     """List provenance artifacts with optional filtering."""
-    results = list(_MOCK_ARTIFACTS)
+    query = select(ArtifactModel)
+    count_query = select(func.count()).select_from(ArtifactModel)
+
     if artifact_type:
-        results = [a for a in results if a.artifact_type == artifact_type]
+        query = query.where(ArtifactModel.artifact_type == artifact_type)
+        count_query = count_query.where(ArtifactModel.artifact_type == artifact_type)
+
     if search:
-        q = search.lower()
-        results = [
-            a for a in results
-            if q in a.artifact_id.lower() or q in a.content_hash.lower()
-        ]
+        pattern = f"%{search}%"
+        search_filter = or_(
+            ArtifactModel.id.ilike(pattern),
+            ArtifactModel.content_hash.ilike(pattern),
+        )
+        query = query.where(search_filter)
+        count_query = count_query.where(search_filter)
+
     if order_id:
-        # Filter by order_id using the detail lookup
-        results = [
-            a for a in results
-            if a.artifact_id in _MOCK_DETAILS
-            and _MOCK_DETAILS[a.artifact_id].order_id == order_id
-        ]
-    total = len(results)
-    return ArtifactListResponse(artifacts=results[offset:offset + limit], total=total)
+        query = query.join(
+            OrderItemModel, ArtifactModel.order_item_id == OrderItemModel.id
+        ).where(OrderItemModel.order_id == order_id)
+        count_query = count_query.join(
+            OrderItemModel, ArtifactModel.order_item_id == OrderItemModel.id
+        ).where(OrderItemModel.order_id == order_id)
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar_one()
+
+    query = query.order_by(ArtifactModel.created_at.desc()).offset(offset).limit(limit)
+    result = await db.execute(query)
+    artifacts = result.scalars().all()
+
+    return ArtifactListResponse(
+        artifacts=[_to_provenance(a) for a in artifacts],
+        total=total,
+    )
 
 
 @router.get("/{artifact_id}", response_model=ArtifactDetail)
-async def get_artifact(artifact_id: str, _user: TokenPayload = Depends(get_current_user)) -> ArtifactDetail:
+async def get_artifact(
+    artifact_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ArtifactDetail:
     """Get detailed artifact information."""
-    detail = _MOCK_DETAILS.get(artifact_id)
-    if not detail:
+    query = (
+        select(ArtifactModel, OrderItemModel.order_id)
+        .outerjoin(OrderItemModel, ArtifactModel.order_item_id == OrderItemModel.id)
+        .where(ArtifactModel.id == artifact_id)
+    )
+    result = await db.execute(query)
+    row = result.one_or_none()
+    if row is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    return detail
+
+    a, linked_order_id = row
+    prov = a.provenance or {}
+    provenance_obj = _to_provenance(a)
+    created_by = prov.get("created_by", "system")
+
+    return ArtifactDetail(
+        artifact_id=a.id,
+        artifact_type=a.artifact_type,
+        content_hash=a.content_hash,
+        llm_snapshot=provenance_obj.llm_snapshot,
+        frozen_inputs=provenance_obj.frozen_inputs,
+        created_at=a.created_at,
+        size_bytes=a.size_bytes or 0,
+        mime_type=a.mime_type or "application/octet-stream",
+        storage_key=a.s3_key,
+        order_id=linked_order_id,
+        created_by=created_by,
+    )
 
 
 @router.get("/{artifact_id}/provenance", response_model=ProvenanceChainResponse)
-async def get_artifact_provenance(artifact_id: str, _user: TokenPayload = Depends(get_current_user)) -> ProvenanceChainResponse:
+async def get_artifact_provenance(
+    artifact_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProvenanceChainResponse:
     """Get provenance chain for an artifact."""
-    steps = _MOCK_PROVENANCE.get(artifact_id)
-    if steps is None:
+    result = await db.execute(
+        select(ArtifactModel).where(ArtifactModel.id == artifact_id)
+    )
+    artifact = result.scalar_one_or_none()
+    if artifact is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
+
+    prov = artifact.provenance or {}
+    raw_steps = prov.get("steps")
+
+    if raw_steps and isinstance(raw_steps, list):
+        steps = [ProvenanceStep(**s) for s in raw_steps]
+    else:
+        # Build a single step from the artifact's provenance data
+        steps = [
+            ProvenanceStep(
+                step_number=1,
+                agent_id=prov.get("created_by", "system"),
+                model_id=prov.get("model_id"),
+                prompt_hash=prov.get("prompt_hash"),
+                input_hash=prov.get("input_hash", artifact.content_hash),
+                output_hash=artifact.content_hash,
+                action=prov.get("action", "generate"),
+                timestamp=artifact.created_at.isoformat(),
+                duration_ms=prov.get("duration_ms", 0),
+            )
+        ]
+
     return ProvenanceChainResponse(artifact_id=artifact_id, steps=steps)
 
 
 @router.get("/{artifact_id}/download", response_model=DownloadResponse)
-async def download_artifact(artifact_id: str, _user: TokenPayload = Depends(get_current_user)) -> DownloadResponse:
+async def download_artifact(
+    artifact_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DownloadResponse:
     """Get download URL for an artifact."""
-    detail = _MOCK_DETAILS.get(artifact_id)
-    if not detail:
+    result = await db.execute(
+        select(ArtifactModel).where(ArtifactModel.id == artifact_id)
+    )
+    artifact = result.scalar_one_or_none()
+    if artifact is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    filename = detail.storage_key.split("/")[-1]
+    filename = artifact.s3_key.split("/")[-1]
+    mime = artifact.mime_type or "application/octet-stream"
+
     return DownloadResponse(
-        download_url=f"https://labelforge-artifacts.s3.amazonaws.com/{detail.storage_key}?X-Amz-Expires=3600",
+        download_url=f"https://labelforge-artifacts.s3.amazonaws.com/{artifact.s3_key}?X-Amz-Expires=3600",
         filename=filename,
-        mime_type=detail.mime_type,
-        size_bytes=detail.size_bytes,
+        mime_type=mime,
+        size_bytes=artifact.size_bytes or 0,
     )

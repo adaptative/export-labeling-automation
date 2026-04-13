@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     app_debug: bool = True
     app_secret_key: str = "change-me-in-production"
 
-    # Database
-    database_url: str = "postgresql+asyncpg://labelforge:labelforge@localhost:5432/labelforge"
+    # Database (default: SQLite for local dev; set to postgresql+asyncpg://... for production)
+    database_url: str = "sqlite+aiosqlite:///labelforge.db"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

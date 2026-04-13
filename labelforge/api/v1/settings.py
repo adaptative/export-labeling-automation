@@ -1,20 +1,24 @@
-"""Settings API routes — profile update, password change, MFA."""
+"""Settings API routes -- profile update, password change, MFA."""
 from __future__ import annotations
 
 import hashlib
-import time
+import secrets
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelforge.api.v1.auth import get_current_user
 from labelforge.core.auth import TokenPayload, log_auth_event
+from labelforge.db.session import get_db
+from labelforge.db.models import User as UserModel
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 
-# ── Request / Response models ────────────────────────────────────────────────
+# -- Request / Response models ------------------------------------------------
 
 
 class ProfileResponse(BaseModel):
@@ -57,119 +61,181 @@ class VerifyMFARequest(BaseModel):
     code: str
 
 
-# ── Stub state ──────────────────────────────────────────────────────────────
-
-_STUB_PROFILE = {
-    "user_id": "usr-admin-001",
-    "email": "admin@nakodacraft.com",
-    "display_name": "Admin User",
-    "phone": None,
-    "timezone": "UTC",
-    "language": "en",
-}
-
-_STUB_PASSWORD_HASH = hashlib.sha256(b"admin123").hexdigest()
-_MFA_ENABLED = False
-_MFA_METHOD: Optional[str] = None
-_MFA_SECRET = "JBSWY3DPEHPK3PXP"  # Stub TOTP secret
+# -- Helpers ------------------------------------------------------------------
 
 
-# ── Routes ──────────────────────────────────────────────────────────────────
+async def _get_current_user_model(
+    user_id: str, tenant_id: str, db: AsyncSession
+) -> UserModel:
+    result = await db.execute(
+        select(UserModel)
+        .where(UserModel.id == user_id)
+        .where(UserModel.tenant_id == tenant_id)
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+# -- Routes -------------------------------------------------------------------
 
 
 @router.get("/profile", response_model=ProfileResponse)
-async def get_profile(_user: TokenPayload = Depends(get_current_user)) -> ProfileResponse:
+async def get_profile(
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProfileResponse:
     """Get the current user's profile."""
-    return ProfileResponse(**_STUB_PROFILE)
+    user = await _get_current_user_model(_user.user_id, _user.tenant_id, db)
+    return ProfileResponse(
+        user_id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        phone=user.phone,
+        timezone=user.timezone,
+        language=user.language,
+    )
 
 
 @router.patch("/profile", response_model=ProfileResponse)
-async def update_profile(req: UpdateProfileRequest, _user: TokenPayload = Depends(get_current_user)) -> ProfileResponse:
+async def update_profile(
+    req: UpdateProfileRequest,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProfileResponse:
     """Update the current user's profile."""
+    user = await _get_current_user_model(_user.user_id, _user.tenant_id, db)
+
     if req.display_name is not None:
-        _STUB_PROFILE["display_name"] = req.display_name
+        user.display_name = req.display_name
     if req.phone is not None:
-        _STUB_PROFILE["phone"] = req.phone
+        user.phone = req.phone
     if req.timezone is not None:
-        _STUB_PROFILE["timezone"] = req.timezone
+        user.timezone = req.timezone
     if req.language is not None:
-        _STUB_PROFILE["language"] = req.language
+        user.language = req.language
 
-    log_auth_event("settings.profile_updated", f"Profile updated for {_STUB_PROFILE['email']}")
+    await db.commit()
+    await db.refresh(user)
 
-    return ProfileResponse(**_STUB_PROFILE)
+    log_auth_event("settings.profile_updated", f"Profile updated for {user.email}")
+
+    return ProfileResponse(
+        user_id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        phone=user.phone,
+        timezone=user.timezone,
+        language=user.language,
+    )
 
 
 @router.post("/password")
-async def change_password(req: ChangePasswordRequest, _user: TokenPayload = Depends(get_current_user)) -> dict:
+async def change_password(
+    req: ChangePasswordRequest,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """Change the current user's password."""
-    global _STUB_PASSWORD_HASH
+    user = await _get_current_user_model(_user.user_id, _user.tenant_id, db)
 
+    # Verify current password
     current_hash = hashlib.sha256(req.current_password.encode()).hexdigest()
-    if current_hash != _STUB_PASSWORD_HASH:
+    if user.hashed_password and current_hash != user.hashed_password:
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
     if len(req.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
 
-    _STUB_PASSWORD_HASH = hashlib.sha256(req.new_password.encode()).hexdigest()
+    user.hashed_password = hashlib.sha256(req.new_password.encode()).hexdigest()
+    await db.commit()
+
     log_auth_event("settings.password_changed", "Password changed")
 
     return {"message": "Password changed successfully"}
 
 
 @router.get("/mfa", response_model=MFAStatusResponse)
-async def get_mfa_status(_user: TokenPayload = Depends(get_current_user)) -> MFAStatusResponse:
+async def get_mfa_status(
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MFAStatusResponse:
     """Get MFA status for the current user."""
-    return MFAStatusResponse(enabled=_MFA_ENABLED, method=_MFA_METHOD)
+    user = await _get_current_user_model(_user.user_id, _user.tenant_id, db)
+    return MFAStatusResponse(enabled=user.mfa_enabled, method=user.mfa_method)
 
 
 @router.post("/mfa/enable", response_model=EnableMFAResponse)
-async def enable_mfa(req: EnableMFARequest, _user: TokenPayload = Depends(get_current_user)) -> EnableMFAResponse:
-    """Enable MFA — returns a TOTP secret and QR URI for setup."""
-    if _MFA_ENABLED:
+async def enable_mfa(
+    req: EnableMFARequest,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> EnableMFAResponse:
+    """Enable MFA -- returns a TOTP secret and QR URI for setup."""
+    user = await _get_current_user_model(_user.user_id, _user.tenant_id, db)
+
+    if user.mfa_enabled:
         raise HTTPException(status_code=400, detail="MFA is already enabled")
 
     if req.method not in ("totp",):
         raise HTTPException(status_code=400, detail=f"Unsupported MFA method: {req.method}")
 
-    qr_uri = f"otpauth://totp/Labelforge:admin@nakodacraft.com?secret={_MFA_SECRET}&issuer=Labelforge"
+    # Generate a TOTP secret if none exists
+    if not user.mfa_secret:
+        user.mfa_secret = secrets.token_hex(16)
+        await db.commit()
+        await db.refresh(user)
+
+    qr_uri = f"otpauth://totp/Labelforge:{user.email}?secret={user.mfa_secret}&issuer=Labelforge"
 
     log_auth_event("settings.mfa_setup_started", f"MFA setup started (method={req.method})")
 
     return EnableMFAResponse(
-        secret=_MFA_SECRET,
+        secret=user.mfa_secret,
         qr_uri=qr_uri,
         message="Scan the QR code with your authenticator app, then verify with a code",
     )
 
 
 @router.post("/mfa/verify")
-async def verify_mfa(req: VerifyMFARequest, _user: TokenPayload = Depends(get_current_user)) -> dict:
+async def verify_mfa(
+    req: VerifyMFARequest,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """Verify MFA code and finalize MFA enrollment."""
-    global _MFA_ENABLED, _MFA_METHOD
+    user = await _get_current_user_model(_user.user_id, _user.tenant_id, db)
 
-    # Stub: accept "123456" as valid code
+    # In production, validate the TOTP code against user.mfa_secret.
+    # For now, accept "123456" as a valid code for testing.
     if req.code != "123456":
         raise HTTPException(status_code=400, detail="Invalid verification code")
 
-    _MFA_ENABLED = True
-    _MFA_METHOD = "totp"
+    user.mfa_enabled = True
+    user.mfa_method = "totp"
+    await db.commit()
+
     log_auth_event("settings.mfa_enabled", "MFA enabled via TOTP")
 
     return {"message": "MFA enabled successfully", "method": "totp"}
 
 
 @router.post("/mfa/disable")
-async def disable_mfa(_user: TokenPayload = Depends(get_current_user)) -> dict:
+async def disable_mfa(
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """Disable MFA for the current user."""
-    global _MFA_ENABLED, _MFA_METHOD
+    user = await _get_current_user_model(_user.user_id, _user.tenant_id, db)
 
-    if not _MFA_ENABLED:
+    if not user.mfa_enabled:
         raise HTTPException(status_code=400, detail="MFA is not enabled")
 
-    _MFA_ENABLED = False
-    _MFA_METHOD = None
+    user.mfa_enabled = False
+    user.mfa_method = None
+    await db.commit()
+
     log_auth_event("settings.mfa_disabled", "MFA disabled")
 
     return {"message": "MFA disabled successfully"}
