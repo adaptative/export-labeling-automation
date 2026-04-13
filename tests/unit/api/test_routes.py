@@ -155,7 +155,7 @@ class TestImporters:
 
     def test_get_importer(self):
         importers = client.get("/api/v1/importers", headers=_AUTH).json()["importers"]
-        importer_id = importers[0]["importer_id"]
+        importer_id = importers[0]["id"]
         resp = client.get(f"/api/v1/importers/{importer_id}", headers=_AUTH)
         assert resp.status_code == 200
 

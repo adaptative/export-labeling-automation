@@ -13,7 +13,7 @@ from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import ImporterProfile
 from labelforge.core.auth import TokenPayload
 from labelforge.core.blobstore import MemoryBlobStore
-from labelforge.db.models import Document, Importer, ImporterProfileModel, Order
+from labelforge.db.models import Document, HiTLThreadModel, Importer, ImporterProfileModel, Order
 from labelforge.db.session import get_db
 
 router = APIRouter(prefix="/importers", tags=["importers"])
@@ -27,8 +27,35 @@ _blob_store = MemoryBlobStore()
 # ── Request / Response models ──────────────────────────────────────────────
 
 
+class ImporterSummaryResponse(BaseModel):
+    """Enriched importer summary matching frontend ImporterSummary interface."""
+    id: str
+    name: str
+    code: str
+    status: str
+    countries: list[str] = []
+    profile_version: int = 0
+    onboarding_progress: int = 0
+    orders_mtd: int = 0
+    open_hitl: int = 0
+    required_fields: list[str] = []
+    # Detail-level fields (populated on GET /{id})
+    buyer_contact: Optional[str] = None
+    buyer_email: Optional[str] = None
+    portal_token: Optional[str] = None
+    since: Optional[str] = None
+    label_languages: list[str] = []
+    units: Optional[str] = None
+    barcode_placement: Optional[str] = None
+    panel_layout: Optional[str] = None
+    brand_treatment: Optional[str] = None
+    handling_symbol_rules: list[str] = []
+    doc_requirements: list[str] = []
+    notes: Optional[str] = None
+
+
 class ImporterListResponse(BaseModel):
-    importers: list[ImporterProfile]
+    importers: list[ImporterSummaryResponse]
     total: int
 
 
@@ -136,9 +163,93 @@ class DocumentListResponse(BaseModel):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
+async def _build_summary(
+    importer: Importer,
+    profile: Optional[ImporterProfileModel],
+    db: AsyncSession,
+    *,
+    include_detail: bool = False,
+) -> ImporterSummaryResponse:
+    """Build enriched summary with computed stats."""
+    # Determine status
+    if not importer.is_active:
+        status = "inactive"
+    elif profile and profile.version >= 1:
+        status = "active"
+    else:
+        status = "onboarding"
+
+    # Compute onboarding progress based on profile fields
+    if profile:
+        filled = sum(1 for f in [
+            profile.brand_treatment, profile.panel_layouts,
+            profile.handling_symbol_rules, profile.pi_template_mapping,
+            profile.logo_asset_hash,
+        ] if f)
+        onboarding_progress = min(100, int((filled / 5) * 100))
+    else:
+        onboarding_progress = 0
+
+    # Count orders for this importer
+    orders_result = await db.execute(
+        select(func.count()).select_from(Order).where(
+            Order.importer_id == importer.id,
+            Order.tenant_id == importer.tenant_id,
+        )
+    )
+    orders_mtd = orders_result.scalar_one()
+
+    # Count open HiTL threads (via orders)
+    order_ids_subq = select(Order.id).where(
+        Order.importer_id == importer.id,
+        Order.tenant_id == importer.tenant_id,
+    ).scalar_subquery()
+    hitl_result = await db.execute(
+        select(func.count()).select_from(HiTLThreadModel).where(
+            HiTLThreadModel.order_id.in_(
+                select(Order.id).where(
+                    Order.importer_id == importer.id,
+                    Order.tenant_id == importer.tenant_id,
+                )
+            ),
+            HiTLThreadModel.status.in_(["OPEN", "IN_PROGRESS"]),
+        )
+    )
+    open_hitl = hitl_result.scalar_one()
+
+    summary = ImporterSummaryResponse(
+        id=importer.id,
+        name=importer.name,
+        code=importer.code,
+        status=status,
+        profile_version=profile.version if profile else 0,
+        onboarding_progress=onboarding_progress,
+        orders_mtd=orders_mtd,
+        open_hitl=open_hitl,
+    )
+
+    if include_detail:
+        summary.buyer_contact = importer.contact_phone
+        summary.buyer_email = importer.contact_email
+        summary.since = importer.created_at.isoformat() if importer.created_at else None
+        summary.notes = importer.address
+        if profile:
+            bt = profile.brand_treatment
+            summary.brand_treatment = bt.get("company_name", "") if bt else None
+            pl = profile.panel_layouts
+            summary.panel_layout = next(iter(pl.values()), None) if pl and isinstance(pl, dict) else None
+            hs = profile.handling_symbol_rules
+            summary.handling_symbol_rules = [k for k, v in hs.items() if v] if hs and isinstance(hs, dict) else []
+
+    return summary
+
+
 def _profile_to_contract(importer: Importer, profile: Optional[ImporterProfileModel]) -> ImporterProfile:
     return ImporterProfile(
         importer_id=importer.id,
+        name=importer.name,
+        code=importer.code,
+        is_active=importer.is_active,
         brand_treatment=profile.brand_treatment if profile else None,
         panel_layouts=profile.panel_layouts if profile else None,
         handling_symbol_rules=profile.handling_symbol_rules if profile else None,
@@ -203,7 +314,7 @@ async def list_importers(
     result = await db.execute(query)
     importers = result.scalars().all()
 
-    profiles: list[ImporterProfile] = []
+    summaries: list[ImporterSummaryResponse] = []
     for importer in importers:
         # Get latest profile (highest version) for each importer
         subq = (
@@ -218,9 +329,9 @@ async def list_importers(
             )
         )
         profile = prof_result.scalar_one_or_none()
-        profiles.append(_profile_to_contract(importer, profile))
+        summaries.append(await _build_summary(importer, profile, db))
 
-    return ImporterListResponse(importers=profiles, total=total)
+    return ImporterListResponse(importers=summaries, total=total)
 
 
 @router.post("", response_model=ImporterResponse, status_code=201)
@@ -245,13 +356,13 @@ async def create_importer(
     return _importer_to_response(importer)
 
 
-@router.get("/{importer_id}", response_model=ImporterProfile)
+@router.get("/{importer_id}", response_model=ImporterSummaryResponse)
 async def get_importer(
     importer_id: str,
     _user: TokenPayload = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> ImporterProfile:
-    """Get a single importer profile by ID."""
+) -> ImporterSummaryResponse:
+    """Get a single importer profile by ID with computed stats."""
     importer = await _get_importer_or_404(importer_id, _user.tenant_id, db)
 
     # Get latest profile
@@ -268,7 +379,7 @@ async def get_importer(
     )
     profile = prof_result.scalar_one_or_none()
 
-    return _profile_to_contract(importer, profile)
+    return await _build_summary(importer, profile, db, include_detail=True)
 
 
 @router.put("/{importer_id}", response_model=ImporterResponse)
