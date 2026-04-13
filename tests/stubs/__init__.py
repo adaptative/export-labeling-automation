@@ -27,13 +27,24 @@ from typing import Optional
 
 @dataclass
 class StubLLMResult:
-    """Minimal LLM completion result for testing."""
+    """Minimal LLM completion result for testing.
+
+    Provides both ``cost`` and ``cost_usd`` so it works with both
+    the old agent interface and the new CompletionResult-style interface.
+    """
     content: str
     cost: float = 0.003
+
+    @property
+    def cost_usd(self) -> float:
+        return self.cost
 
 
 class StubLLMProvider:
     """In-memory fake LLM provider.
+
+    Supports both the legacy (prompt, model_id) calling convention and
+    the new (model, messages, ...) calling convention used by core.llm.
 
     Swap with real provider:
         from labelforge.services.llm_provider import AnthropicLLMProvider as RealLLMProvider
@@ -44,8 +55,14 @@ class StubLLMProvider:
         self._cost = cost
         self.calls: list[dict] = []
 
-    async def complete(self, prompt: str, model_id: str = "", **kwargs):
-        self.calls.append({"prompt": prompt, "model_id": model_id, **kwargs})
+    async def complete(self, prompt: str = "", model_id: str = "", *,
+                       model: str = "", messages=None, temperature: float = 0.0,
+                       max_tokens: int = 4096, **kwargs):
+        self.calls.append({
+            "prompt": prompt, "model_id": model_id or model,
+            "messages": messages, "temperature": temperature,
+            "max_tokens": max_tokens, **kwargs,
+        })
         return StubLLMResult(content=self._default_content, cost=self._cost)
 
 

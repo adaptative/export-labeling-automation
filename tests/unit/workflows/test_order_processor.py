@@ -1,9 +1,11 @@
-"""Tests for the order processing workflow — state machine."""
+"""Tests for the order processing workflow — state machine + Temporal contracts."""
 import pytest
 from labelforge.contracts.models import ItemState, OrderState, OrderItem, compute_order_state
 from labelforge.workflows.order_processor import (
     STATE_TRANSITIONS, WorkflowConfig, is_valid_transition, transition_item,
     MAX_RETRIES, ACTIVITY_TIMEOUT_SECONDS,
+    ActivityInput, ActivityOutput, DEFAULT_RETRY_POLICY, PIPELINE_STEPS,
+    ALL_ACTIVITIES,
 )
 
 
@@ -97,3 +99,97 @@ def test_workflow_config_defaults():
     assert config.max_retries == MAX_RETRIES
     assert config.activity_timeout == ACTIVITY_TIMEOUT_SECONDS
     assert config.concurrency_limit == 8
+
+
+# ── ActivityInput / ActivityOutput contracts ──────────────────────────────────
+
+
+def test_activity_input_defaults():
+    inp = ActivityInput(order_id="o1", item_id="i1", tenant_id="t1")
+    assert inp.document_id is None
+    assert inp.payload == {}
+
+
+def test_activity_input_with_payload():
+    inp = ActivityInput(
+        order_id="o1", item_id="i1", tenant_id="t1",
+        payload={"doc_content": "hello"},
+    )
+    assert inp.payload["doc_content"] == "hello"
+
+
+def test_activity_output_success():
+    out = ActivityOutput(
+        success=True, item_id="i1",
+        new_state=ItemState.INTAKE_CLASSIFIED.value,
+    )
+    assert out.success is True
+    assert out.needs_hitl is False
+    assert out.cost_usd == 0.0
+
+
+def test_activity_output_hitl():
+    out = ActivityOutput(
+        success=False, item_id="i1",
+        new_state=ItemState.HUMAN_BLOCKED.value,
+        needs_hitl=True,
+        hitl_reason="Low confidence",
+    )
+    assert out.needs_hitl is True
+    assert out.hitl_reason == "Low confidence"
+
+
+# ── Retry policy ────────────────────────────────────────────────────────────
+
+
+def test_retry_policy_max_attempts():
+    assert DEFAULT_RETRY_POLICY.maximum_attempts == MAX_RETRIES
+
+
+def test_retry_policy_backoff_coefficient():
+    assert DEFAULT_RETRY_POLICY.backoff_coefficient == 2.0
+
+
+# ── Pipeline steps ──────────────────────────────────────────────────────────
+
+
+def test_pipeline_has_7_steps():
+    assert len(PIPELINE_STEPS) == 7
+
+
+def test_pipeline_step_names():
+    names = [name for name, _, _ in PIPELINE_STEPS]
+    assert names == [
+        "intake_classify",
+        "parse_document",
+        "fuse_data",
+        "compliance_eval",
+        "generate_drawing",
+        "compose_label",
+        "validate_output",
+    ]
+
+
+def test_pipeline_target_states():
+    states = [state.value for _, _, state in PIPELINE_STEPS]
+    assert states == [
+        "INTAKE_CLASSIFIED",
+        "PARSED",
+        "FUSED",
+        "COMPLIANCE_EVAL",
+        "DRAWING_GENERATED",
+        "COMPOSED",
+        "VALIDATED",
+    ]
+
+
+# ── All activities registered ───────────────────────────────────────────────
+
+
+def test_all_activities_count():
+    assert len(ALL_ACTIVITIES) == 9
+
+
+def test_all_activities_are_callable():
+    for act in ALL_ACTIVITIES:
+        assert callable(act)
