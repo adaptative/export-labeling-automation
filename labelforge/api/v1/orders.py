@@ -1,11 +1,12 @@
 """Order endpoints."""
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +45,36 @@ class OrderDetail(OrderSummary):
 class OrderListResponse(BaseModel):
     orders: list[OrderSummary]
     total: int
+
+
+# ── Request models ──────────────────────────────────────────────────────────
+
+
+class CreateOrderRequest(BaseModel):
+    importer_id: str = Field(..., min_length=1)
+    po_reference: Optional[str] = None
+    due_date: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class CreateOrderResponse(BaseModel):
+    id: str
+    importer_id: str
+    po_number: str
+    state: OrderState
+    item_count: int
+    created_at: datetime
+    message: str
+
+
+class OrderActionResponse(BaseModel):
+    order_id: str
+    new_state: str
+    message: str
+
+
+class RejectRequest(BaseModel):
+    reason: str = ""
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -248,14 +279,117 @@ async def list_order_items(
     ]
 
 
-class OrderActionResponse(BaseModel):
-    order_id: str
-    new_state: str
-    message: str
+# ── Create order ────────────────────────────────────────────────────────────
 
 
-class RejectRequest(BaseModel):
-    reason: str = ""
+@router.post("", response_model=CreateOrderResponse, status_code=201)
+async def create_order(
+    body: CreateOrderRequest,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CreateOrderResponse:
+    """Create a new order. Documents can be uploaded separately."""
+    order_id = f"ORD-{datetime.now(timezone.utc).strftime('%Y')}-{uuid.uuid4().hex[:4].upper()}"
+    po_number = body.po_reference or order_id
+    now = datetime.now(timezone.utc)
+
+    new_order = Order(
+        id=order_id,
+        tenant_id=_user.tenant_id,
+        importer_id=body.importer_id,
+        po_number=po_number,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(new_order)
+    await db.commit()
+
+    return CreateOrderResponse(
+        id=order_id,
+        importer_id=body.importer_id,
+        po_number=po_number,
+        state=OrderState.CREATED,
+        item_count=0,
+        created_at=now,
+        message=f"Order {order_id} created. Upload documents to start the pipeline.",
+    )
+
+
+# ── Order-scoped document upload ────────────────────────────────────────────
+
+
+@router.post("/{order_id}/documents", status_code=201)
+async def upload_order_document(
+    order_id: str,
+    file: UploadFile = File(...),
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Upload a document to a specific order.
+
+    This is a convenience endpoint that delegates to the documents module.
+    """
+    from labelforge.api.v1.documents import (
+        get_blob_store,
+        _documents,
+        DocumentRecord,
+        _classify_by_filename,
+    )
+    from labelforge.core.blobstore import BlobMeta
+
+    # Verify order exists in DB
+    order_check = await db.execute(
+        select(Order.id).where(
+            Order.id == order_id,
+            Order.tenant_id == _user.tenant_id,
+        )
+    )
+    if order_check.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    filename = file.filename or "unnamed.pdf"
+    content = await file.read()
+    size_bytes = len(content)
+
+    if size_bytes == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if size_bytes > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File exceeds 25 MB limit")
+
+    doc_id = f"doc-{uuid.uuid4().hex[:8]}"
+    storage_key = f"{order_id}/{filename}"
+
+    store = get_blob_store()
+    blob_meta: BlobMeta = await store.upload(key=storage_key, data=content, content_type=file.content_type)
+
+    quick_class, quick_confidence = _classify_by_filename(filename)
+
+    doc = DocumentRecord(
+        id=doc_id,
+        order_id=order_id,
+        filename=filename,
+        doc_class=quick_class,
+        confidence=quick_confidence,
+        storage_key=storage_key,
+        content_hash=blob_meta.sha256,
+        size_bytes=size_bytes,
+        classification_status="pending",
+    )
+    _documents.append(doc)
+
+    return {
+        "id": doc_id,
+        "order_id": order_id,
+        "filename": filename,
+        "doc_class": quick_class,
+        "confidence": quick_confidence,
+        "size_bytes": size_bytes,
+        "classification_status": "pending",
+        "message": f"Document '{filename}' uploaded to order {order_id}. Classification pending.",
+    }
+
+
+# ── Order actions ───────────────────────────────────────────────────────────
 
 
 @router.post("/{order_id}/approve", response_model=OrderActionResponse)

@@ -37,3 +37,4 @@ secrets.json
 credentials.json
 .env.local
 .env.*.local
+labelforge.db
