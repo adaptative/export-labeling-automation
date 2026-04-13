@@ -6,6 +6,7 @@ from fastapi import APIRouter
 from labelforge.api.v1 import (
     admin,
     artifacts,
+    audit_log,
     auth,
     budgets,
     documents,
@@ -22,6 +23,7 @@ from labelforge.api.v1 import (
 api_router = APIRouter()
 
 api_router.include_router(admin.router)
+api_router.include_router(audit_log.router)
 api_router.include_router(auth.router)
 api_router.include_router(budgets.router)
 api_router.include_router(orders.router)
