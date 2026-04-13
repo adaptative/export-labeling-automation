@@ -237,7 +237,7 @@ class ComplianceReport(BaseModel):
 
 class LLMSnapshot(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {
-        "model_id": "claude-sonnet-4-20250514",
+        "model_id": "gpt-5.4",
         "prompt_hash": "sha256:a3f1c9b2e8d74506f1234567890abcdef1234567",
         "temperature": 0.0,
         "max_tokens": 4096,
@@ -272,7 +272,7 @@ class Provenance(BaseModel):
         "artifact_type": "die_cut_svg",
         "content_hash": "sha256:e7f8a9b0c1d2e3f4567890abcdef1234",
         "llm_snapshot": {
-            "model_id": "claude-sonnet-4-20250514",
+            "model_id": "gpt-5.4",
             "prompt_hash": "sha256:a3f1c9b2e8d74506f1234567890abcdef1234567",
             "temperature": 0.0,
             "max_tokens": 4096,

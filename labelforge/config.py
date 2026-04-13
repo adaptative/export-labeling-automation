@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     temporal_task_queue: str = "labelforge-tasks"
 
     # LLM
-    anthropic_api_key: str = ""
-    llm_default_model: str = "claude-sonnet-4-20250514"
+    openai_api_key: str = ""
+    llm_default_model: str = "gpt-5.4"
 
     # JWT
     jwt_secret_key: str = "change-me-in-production"

@@ -1,6 +1,6 @@
-"""AI provider interface and cost estimation.
+"""AI provider interface with real OpenAI integration.
 
-Provides LLMProvider ABC, ClaudeProvider stub, CompletionResult dataclass,
+Provides LLMProvider ABC, OpenAIProvider (real), CompletionResult dataclass,
 token pricing table, fallback providers with backoff, caching, and logging.
 """
 from __future__ import annotations
@@ -13,14 +13,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
+import openai
+
 logger = logging.getLogger(__name__)
 
 # ── Token pricing (USD per 1K tokens) ──────────────────────────────────────
 
 TOKEN_PRICING: Dict[str, Dict[str, float]] = {
-    "claude-sonnet-4-20250514": {"input": 0.003, "output": 0.015},
-    "claude-opus-4-20250514": {"input": 0.015, "output": 0.075},
-    "claude-haiku-4-20250514": {"input": 0.00025, "output": 0.00125},
+    "gpt-5.4": {"input": 0.005, "output": 0.015},
     "gpt-4o": {"input": 0.005, "output": 0.015},
     "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
 }
@@ -110,7 +110,7 @@ class LLMProvider(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """Provider name (e.g., 'claude', 'openai')."""
+        """Provider name (e.g., 'openai')."""
 
     @abstractmethod
     async def complete(
@@ -151,21 +151,23 @@ class LLMProvider(ABC):
         return result
 
 
-# ── Claude provider (stub) ────────────────────────────────────────────────
+# ── OpenAI provider (real) ───────────────────────────────────────────────
 
 
-class ClaudeProvider(LLMProvider):
-    """Anthropic Claude provider.
+class OpenAIProvider(LLMProvider):
+    """OpenAI provider using the openai SDK.
 
-    Stub implementation for development. In production, uses anthropic SDK.
+    Calls the real OpenAI Chat Completions API.
     """
 
-    def __init__(self, api_key: str = "") -> None:
-        self._api_key = api_key
+    def __init__(self, api_key: str) -> None:
+        if not api_key:
+            raise ValueError("OpenAI API key is required")
+        self._client = openai.AsyncOpenAI(api_key=api_key)
 
     @property
     def name(self) -> str:
-        return "claude"
+        return "openai"
 
     async def complete(
         self,
@@ -177,19 +179,77 @@ class ClaudeProvider(LLMProvider):
     ) -> CompletionResult:
         start = time.monotonic()
 
-        # Stub: estimate tokens from message content length
-        input_text = " ".join(m.get("content", "") for m in messages)
-        input_tokens = max(1, len(input_text) // 4)
-        output_tokens = max(1, max_tokens // 4)
+        response = await self._client.chat.completions.create(
+            model=model,
+            messages=[{"role": m.get("role", "user"), "content": m.get("content", "")} for m in messages],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
 
-        content = f"[stub response from {model}]"
-        cost = estimate_cost(model, input_tokens, output_tokens)
         latency = (time.monotonic() - start) * 1000
+        choice = response.choices[0]
+        content = choice.message.content or ""
+        usage = response.usage
+        input_tokens = usage.prompt_tokens if usage else 0
+        output_tokens = usage.completion_tokens if usage else 0
+        cost = estimate_cost(model, input_tokens, output_tokens)
 
         logger.info(
-            "Claude completion: model=%s input_tokens=%d output_tokens=%d cost=$%.6f latency=%.1fms",
+            "OpenAI completion: model=%s input_tokens=%d output_tokens=%d cost=$%.6f latency=%.1fms",
             model, input_tokens, output_tokens, cost, latency,
         )
+
+        return CompletionResult(
+            content=content,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+            latency_ms=round(latency, 2),
+            provider=self.name,
+            metadata={"finish_reason": choice.finish_reason},
+        )
+
+
+# ── Stub provider (for testing only) ─────────────────────────────────────
+
+
+class StubProvider(LLMProvider):
+    """In-memory stub for unit testing. Does NOT call any API."""
+
+    def __init__(self) -> None:
+        self.calls: List[Dict[str, Any]] = []
+        self._responses: Dict[str, str] = {}
+
+    @property
+    def name(self) -> str:
+        return "stub"
+
+    def set_response(self, prompt_contains: str, response: str) -> None:
+        self._responses[prompt_contains] = response
+
+    async def complete(
+        self,
+        model: str,
+        messages: Sequence[Dict[str, str]],
+        max_tokens: int = 4096,
+        temperature: float = 0.0,
+        **kwargs: Any,
+    ) -> CompletionResult:
+        start = time.monotonic()
+        self.calls.append({"model": model, "messages": list(messages), **kwargs})
+
+        input_text = " ".join(m.get("content", "") for m in messages)
+        content = "[stub response]"
+        for key, resp in self._responses.items():
+            if key in input_text:
+                content = resp
+                break
+
+        input_tokens = max(1, len(input_text) // 4)
+        output_tokens = max(1, len(content) // 4)
+        cost = estimate_cost(model, input_tokens, output_tokens)
+        latency = (time.monotonic() - start) * 1000
 
         return CompletionResult(
             content=content,
@@ -246,6 +306,5 @@ class FallbackProvider(LLMProvider):
                     provider.name, attempt + 1, e, delay,
                 )
                 # In production: await asyncio.sleep(delay)
-                # For testing we skip the actual sleep
 
         raise RuntimeError(f"All {len(self._providers)} providers failed") from last_error

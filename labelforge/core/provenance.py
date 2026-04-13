@@ -35,7 +35,7 @@ class ProvenanceEmitter:
     Usage:
         emitter = ProvenanceEmitter(blob_store, db_session)
         record = await emitter.emit("die_cut_svg", svg_bytes,
-            llm_snapshot={"model": "claude-sonnet-4-20250514", ...},
+            llm_snapshot={"model": "gpt-5.4", ...},
             frozen_inputs={"profile_version": 2, ...},
         )
         is_reproducible = await emitter.reproduce(record.artifact_id)

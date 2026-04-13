@@ -66,7 +66,7 @@ _MOCK_ARTIFACTS: List[Provenance] = [
         artifact_type="fused_item",
         content_hash="sha256:abcdef1234567890",
         llm_snapshot=LLMSnapshot(
-            model_id="claude-sonnet-4-20250514",
+            model_id="gpt-5.4",
             prompt_hash="sha256:prompt001",
             temperature=0.0,
             max_tokens=4096,
@@ -84,7 +84,7 @@ _MOCK_ARTIFACTS: List[Provenance] = [
         artifact_type="compliance_report",
         content_hash="sha256:fedcba0987654321",
         llm_snapshot=LLMSnapshot(
-            model_id="claude-sonnet-4-20250514",
+            model_id="gpt-5.4",
             prompt_hash="sha256:prompt002",
             temperature=0.0,
             max_tokens=4096,
@@ -147,21 +147,21 @@ _MOCK_DETAILS: Dict[str, ArtifactDetail] = {
 
 _MOCK_PROVENANCE: Dict[str, List[ProvenanceStep]] = {
     "art-001": [
-        ProvenanceStep(step_number=1, agent_id="extractor-agent-v2", model_id="claude-sonnet-4-20250514",
+        ProvenanceStep(step_number=1, agent_id="extractor-agent-v2", model_id="gpt-5.4",
                        prompt_hash="sha256:ext001", input_hash="sha256:po001",
                        output_hash="sha256:extracted001", action="extract",
                        timestamp="2026-04-08T09:30:00Z", duration_ms=4200),
-        ProvenanceStep(step_number=2, agent_id="composer-agent-v3", model_id="claude-sonnet-4-20250514",
+        ProvenanceStep(step_number=2, agent_id="composer-agent-v3", model_id="gpt-5.4",
                        prompt_hash="sha256:prompt001", input_hash="sha256:extracted001",
                        output_hash="sha256:abcdef1234567890", action="compose",
                        timestamp="2026-04-08T09:45:00Z", duration_ms=8500),
-        ProvenanceStep(step_number=3, agent_id="validator-agent-v2", model_id="claude-sonnet-4-20250514",
+        ProvenanceStep(step_number=3, agent_id="validator-agent-v2", model_id="gpt-5.4",
                        prompt_hash="sha256:val001", input_hash="sha256:abcdef1234567890",
                        output_hash="sha256:abcdef1234567890", action="validate",
                        timestamp="2026-04-08T10:00:00Z", duration_ms=3100),
     ],
     "art-002": [
-        ProvenanceStep(step_number=1, agent_id="validator-agent-v2", model_id="claude-sonnet-4-20250514",
+        ProvenanceStep(step_number=1, agent_id="validator-agent-v2", model_id="gpt-5.4",
                        prompt_hash="sha256:prompt002", input_hash="sha256:abcdef1234567890",
                        output_hash="sha256:fedcba0987654321", action="validate",
                        timestamp="2026-04-08T10:15:00Z", duration_ms=6200),
