@@ -81,7 +81,7 @@ class TestContractModels:
 
     def test_document_has_doc_class_field(self):
         schema = _get_schema()
-        doc = schema["components"]["schemas"]["Document"]
+        doc = schema["components"]["schemas"]["DocumentResponse"]
         assert "doc_class" in doc["properties"]
 
 
