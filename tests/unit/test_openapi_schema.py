@@ -118,6 +118,7 @@ class TestSchemaCompleteness:
             "/api/v1/artifacts",
             "/api/v1/notifications",
             "/api/v1/warning-labels",
+            "/api/v1/dashboard/stats",
         }
         missing = required - paths
         assert not missing, f"Missing paths: {missing}"
