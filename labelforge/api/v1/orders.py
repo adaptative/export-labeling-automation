@@ -4,10 +4,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
+from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import OrderItem, OrderState, ItemState
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -105,6 +107,7 @@ async def list_orders(
     search: Optional[str] = Query(None, description="Search by PO number or order ID"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> OrderListResponse:
     """List orders with optional filtering."""
     results = _MOCK_ORDERS
@@ -122,7 +125,7 @@ async def list_orders(
 
 
 @router.get("/{order_id}", response_model=OrderDetail)
-async def get_order(order_id: str) -> OrderDetail:
+async def get_order(order_id: str, _user: TokenPayload = Depends(get_current_user)) -> OrderDetail:
     """Get a single order by ID."""
     summary = next((o for o in _MOCK_ORDERS if o.id == order_id), None)
     if summary is None:
@@ -132,6 +135,6 @@ async def get_order(order_id: str) -> OrderDetail:
 
 
 @router.get("/{order_id}/items", response_model=list[OrderItem])
-async def list_order_items(order_id: str) -> list[OrderItem]:
+async def list_order_items(order_id: str, _user: TokenPayload = Depends(get_current_user)) -> list[OrderItem]:
     """List all items belonging to an order."""
     return [i for i in _MOCK_ITEMS if i.order_id == order_id]

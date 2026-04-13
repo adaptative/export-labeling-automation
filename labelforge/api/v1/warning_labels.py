@@ -4,8 +4,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
+
+from labelforge.api.v1.auth import get_current_user
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/warning-labels", tags=["warning-labels"])
 
@@ -102,6 +105,7 @@ async def list_warning_labels(
     active: Optional[bool] = Query(None, description="Filter by active status"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> WarningLabelListResponse:
     """List warning labels with optional filtering."""
     results = _MOCK_LABELS

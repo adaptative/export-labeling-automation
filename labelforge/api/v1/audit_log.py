@@ -4,8 +4,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+
+from labelforge.api.v1.auth import get_current_user
+from labelforge.core.auth import TokenPayload
 
 router = APIRouter(prefix="/audit-log", tags=["audit-log"])
 
@@ -114,6 +117,7 @@ async def list_audit_entries(
     sort_order: str = Query("desc", description="asc or desc"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> AuditListResponse:
     """List audit log entries with search, filter, and pagination."""
     results = list(_ENTRIES)
@@ -150,7 +154,7 @@ async def list_audit_entries(
 
 
 @router.get("/{entry_id}", response_model=AuditEntry)
-async def get_audit_entry(entry_id: str) -> AuditEntry:
+async def get_audit_entry(entry_id: str, _user: TokenPayload = Depends(get_current_user)) -> AuditEntry:
     """Get a single audit log entry by ID."""
     for entry in _ENTRIES:
         if entry.id == entry_id:

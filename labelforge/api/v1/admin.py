@@ -5,10 +5,11 @@ import hashlib
 import time
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from labelforge.core.auth import Role, log_auth_event
+from labelforge.api.v1.auth import get_current_user
+from labelforge.core.auth import Role, TokenPayload, log_auth_event
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -121,6 +122,7 @@ _next_user_id = 5
 async def list_users(
     role: Optional[str] = Query(None, description="Filter by role"),
     status: Optional[str] = Query(None, description="Filter by status"),
+    _user: TokenPayload = Depends(get_current_user),
 ) -> UserListResponse:
     """List all users with optional role/status filtering."""
     users = _STUB_USERS
@@ -135,7 +137,7 @@ async def list_users(
 
 
 @router.post("/users/invite", response_model=InviteUserResponse, status_code=201)
-async def invite_user(req: InviteUserRequest) -> InviteUserResponse:
+async def invite_user(req: InviteUserRequest, _user: TokenPayload = Depends(get_current_user)) -> InviteUserResponse:
     """Invite a new user by email."""
     global _next_user_id
 
@@ -171,7 +173,7 @@ async def invite_user(req: InviteUserRequest) -> InviteUserResponse:
 
 
 @router.patch("/users/{user_id}/role")
-async def update_user_role(user_id: str, req: UpdateRoleRequest) -> dict:
+async def update_user_role(user_id: str, req: UpdateRoleRequest, _user: TokenPayload = Depends(get_current_user)) -> dict:
     """Update a user's role."""
     valid_roles = {r.value for r in Role}
     if req.role not in valid_roles:
@@ -189,7 +191,7 @@ async def update_user_role(user_id: str, req: UpdateRoleRequest) -> dict:
 
 
 @router.post("/users/{user_id}/deactivate")
-async def deactivate_user(user_id: str) -> dict:
+async def deactivate_user(user_id: str, _user: TokenPayload = Depends(get_current_user)) -> dict:
     """Deactivate a user account."""
     user = next((u for u in _STUB_USERS if u["user_id"] == user_id), None)
     if not user:
@@ -202,7 +204,7 @@ async def deactivate_user(user_id: str) -> dict:
 
 
 @router.post("/users/{user_id}/activate")
-async def activate_user(user_id: str) -> dict:
+async def activate_user(user_id: str, _user: TokenPayload = Depends(get_current_user)) -> dict:
     """Reactivate a deactivated user account."""
     user = next((u for u in _STUB_USERS if u["user_id"] == user_id), None)
     if not user:
@@ -215,13 +217,13 @@ async def activate_user(user_id: str) -> dict:
 
 
 @router.get("/sso", response_model=SSOConfigResponse)
-async def get_sso_config() -> SSOConfigResponse:
+async def get_sso_config(_user: TokenPayload = Depends(get_current_user)) -> SSOConfigResponse:
     """Get current SSO configuration."""
     return SSOConfigResponse(**_SSO_CONFIG)
 
 
 @router.put("/sso")
-async def update_sso_config(req: UpdateSSOConfigRequest) -> dict:
+async def update_sso_config(req: UpdateSSOConfigRequest, _user: TokenPayload = Depends(get_current_user)) -> dict:
     """Update SSO configuration."""
     if req.oidc_google_enabled is not None:
         _SSO_CONFIG["oidc_google_enabled"] = req.oidc_google_enabled

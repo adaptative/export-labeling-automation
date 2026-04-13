@@ -7,7 +7,7 @@ import json
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from labelforge.config import settings
@@ -18,6 +18,7 @@ from labelforge.core.auth import (
     Role,
     ROLE_CAPABILITIES,
     SAMLConfig,
+    TokenPayload,
     decode_token,
     log_auth_event,
 )
@@ -53,6 +54,21 @@ class LogoutResponse(BaseModel):
 class SSORedirectResponse(BaseModel):
     redirect_url: str
     provider: str
+
+
+# ── Auth dependency ─────────────────────────────────────────────────────────
+
+
+async def get_current_user(request: Request) -> TokenPayload:
+    """FastAPI dependency: extract and validate JWT from Authorization header."""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = auth_header[len("Bearer "):]
+    try:
+        return decode_token(token, settings.jwt_secret_key)
+    except AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -146,13 +162,21 @@ async def login(req: LoginRequest) -> LoginResponse:
 
 
 @router.post("/refresh", response_model=RefreshResponse, status_code=200)
-async def refresh_token() -> RefreshResponse:
-    """Refresh an access token using the refresh token (from httpOnly cookie).
+async def refresh_token(current_user: TokenPayload = Depends(get_current_user)) -> RefreshResponse:
+    """Refresh an access token using the current valid JWT."""
+    # Look up user info from STUB_USERS to get email for new token
+    email = ""
+    for user_email, user_data in STUB_USERS.items():
+        if user_data["user_id"] == current_user.user_id:
+            email = user_email
+            break
+    if not email:
+        raise HTTPException(status_code=401, detail="User not found")
 
-    Stub: always returns a new token for the admin user.
-    In production, validates the refresh token from the cookie.
-    """
-    token = _make_stub_jwt("usr-admin-001", "tnt-nakoda-001", "ADMIN", "admin@nakodacraft.com")
+    token = _make_stub_jwt(
+        current_user.user_id, current_user.tenant_id,
+        current_user.role.value, email,
+    )
     return RefreshResponse(
         access_token=token,
         expires_in=settings.jwt_expiration_minutes * 60,
@@ -209,15 +233,21 @@ async def saml_login(provider: str) -> SSORedirectResponse:
 
 
 @router.get("/me")
-async def get_current_user() -> dict:
-    """Get the current authenticated user's info.
+async def get_me(current_user: TokenPayload = Depends(get_current_user)) -> dict:
+    """Get the current authenticated user's info from the JWT."""
+    # Look up display_name from STUB_USERS
+    user_info = None
+    email = ""
+    for user_email, user_data in STUB_USERS.items():
+        if user_data["user_id"] == current_user.user_id:
+            user_info = user_data
+            email = user_email
+            break
 
-    Stub: returns the admin user. In production, decodes JWT from header.
-    """
     return {
-        "user_id": "usr-admin-001",
-        "email": "admin@nakodacraft.com",
-        "display_name": "Admin User",
-        "role": "ADMIN",
-        "tenant_id": "tnt-nakoda-001",
+        "user_id": current_user.user_id,
+        "email": email,
+        "display_name": user_info["display_name"] if user_info else "Unknown",
+        "role": current_user.role.value,
+        "tenant_id": current_user.tenant_id,
     }
