@@ -9,23 +9,6 @@ from fastapi.testclient import TestClient
 from labelforge.app import app
 
 
-@pytest.fixture(autouse=True)
-def _reset_stub_state():
-    """Reset stub data between tests."""
-    import labelforge.api.v1.settings as settings_mod
-
-    original_profile = dict(settings_mod._STUB_PROFILE)
-    original_hash = settings_mod._STUB_PASSWORD_HASH
-    original_mfa = settings_mod._MFA_ENABLED
-    original_method = settings_mod._MFA_METHOD
-    yield
-    settings_mod._STUB_PROFILE.clear()
-    settings_mod._STUB_PROFILE.update(original_profile)
-    settings_mod._STUB_PASSWORD_HASH = original_hash
-    settings_mod._MFA_ENABLED = original_mfa
-    settings_mod._MFA_METHOD = original_method
-
-
 # ── Profile ─────────────────────────────────────────────────────────────────
 
 

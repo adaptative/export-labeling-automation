@@ -5,23 +5,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from labelforge.app import app
-from labelforge.api.v1.admin import _STUB_USERS, _SSO_CONFIG
-
-
-@pytest.fixture(autouse=True)
-def _reset_stub_state():
-    """Reset stub data between tests."""
-    import labelforge.api.v1.admin as admin_mod
-
-    original_users = [dict(u) for u in _STUB_USERS]
-    original_sso = dict(_SSO_CONFIG)
-    original_next_id = admin_mod._next_user_id
-    yield
-    _STUB_USERS.clear()
-    _STUB_USERS.extend(original_users)
-    _SSO_CONFIG.clear()
-    _SSO_CONFIG.update(original_sso)
-    admin_mod._next_user_id = original_next_id
 
 
 # ── User listing ────────────────────────────────────────────────────────────

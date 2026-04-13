@@ -1,12 +1,25 @@
 """FastAPI application entry point."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from labelforge.config import settings
 from labelforge.api.v1.router import api_router
 from labelforge.api.v1.errors import register_error_handlers
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Create tables and seed data on startup."""
+    from labelforge.db.session import create_all_tables
+    from labelforge.db.seed import seed_if_empty
+    await create_all_tables()
+    await seed_if_empty()
+    yield
+
 
 app = FastAPI(
     title="Labelforge API",
@@ -15,6 +28,7 @@ app = FastAPI(
     docs_url="/api/v1/docs",
     redoc_url="/api/v1/redoc",
     openapi_url="/api/v1/openapi.json",
+    lifespan=lifespan,
 )
 
 # CORS

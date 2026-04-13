@@ -1,20 +1,24 @@
-"""Admin API routes — user management and SSO configuration."""
+"""Admin API routes -- user management and SSO configuration."""
 from __future__ import annotations
 
-import hashlib
-import time
+from datetime import datetime, timezone
 from typing import List, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelforge.api.v1.auth import get_current_user
 from labelforge.core.auth import Role, TokenPayload, log_auth_event
+from labelforge.db.session import get_db
+from labelforge.db.models import User as UserModel, SSOConfig
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-# ── Request / Response models ────────────────────────────────────────────────
+# -- Request / Response models ------------------------------------------------
 
 
 class UserResponse(BaseModel):
@@ -64,58 +68,22 @@ class UpdateSSOConfigRequest(BaseModel):
     saml_microsoft_metadata_url: Optional[str] = None
 
 
-# ── Stub data ───────────────────────────────────────────────────────────────
-
-_STUB_USERS: List[dict] = [
-    {
-        "user_id": "usr-admin-001",
-        "email": "admin@nakodacraft.com",
-        "display_name": "Admin User",
-        "role": "ADMIN",
-        "status": "active",
-        "last_active": "2026-04-12T10:00:00Z",
-        "created_at": "2025-01-15T09:00:00Z",
-    },
-    {
-        "user_id": "usr-ops-001",
-        "email": "ops@nakodacraft.com",
-        "display_name": "Ops Manager",
-        "role": "OPS",
-        "status": "active",
-        "last_active": "2026-04-11T16:30:00Z",
-        "created_at": "2025-02-20T09:00:00Z",
-    },
-    {
-        "user_id": "usr-comp-001",
-        "email": "compliance@nakodacraft.com",
-        "display_name": "Compliance Officer",
-        "role": "COMPLIANCE",
-        "status": "active",
-        "last_active": "2026-04-10T14:15:00Z",
-        "created_at": "2025-03-10T09:00:00Z",
-    },
-    {
-        "user_id": "usr-ext-001",
-        "email": "importer@acme.com",
-        "display_name": "Acme Importer",
-        "role": "EXTERNAL",
-        "status": "active",
-        "last_active": "2026-04-09T11:00:00Z",
-        "created_at": "2025-06-01T09:00:00Z",
-    },
-]
-
-_SSO_CONFIG = {
-    "oidc_google_enabled": False,
-    "oidc_google_client_id": None,
-    "saml_microsoft_enabled": False,
-    "saml_microsoft_entity_id": None,
-}
-
-_next_user_id = 5
+# -- Helpers ------------------------------------------------------------------
 
 
-# ── Routes ──────────────────────────────────────────────────────────────────
+def _user_to_response(u: UserModel) -> UserResponse:
+    return UserResponse(
+        user_id=u.id,
+        email=u.email,
+        display_name=u.display_name,
+        role=u.role,
+        status="active" if u.is_active else "deactivated",
+        last_active=u.last_active.isoformat() if u.last_active else None,
+        created_at=u.created_at.isoformat() if u.created_at else "",
+    )
+
+
+# -- Routes -------------------------------------------------------------------
 
 
 @router.get("/users", response_model=UserListResponse)
@@ -123,45 +91,59 @@ async def list_users(
     role: Optional[str] = Query(None, description="Filter by role"),
     status: Optional[str] = Query(None, description="Filter by status"),
     _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> UserListResponse:
     """List all users with optional role/status filtering."""
-    users = _STUB_USERS
+    q = select(UserModel).where(UserModel.tenant_id == _user.tenant_id)
+
     if role:
-        users = [u for u in users if u["role"] == role]
-    if status:
-        users = [u for u in users if u["status"] == status]
+        q = q.where(UserModel.role == role)
+    if status == "active":
+        q = q.where(UserModel.is_active.is_(True))
+    elif status == "deactivated":
+        q = q.where(UserModel.is_active.is_(False))
+
+    result = await db.execute(q.order_by(UserModel.created_at))
+    users = result.scalars().all()
+
     return UserListResponse(
-        users=[UserResponse(**u) for u in users],
+        users=[_user_to_response(u) for u in users],
         total=len(users),
     )
 
 
 @router.post("/users/invite", response_model=InviteUserResponse, status_code=201)
-async def invite_user(req: InviteUserRequest, _user: TokenPayload = Depends(get_current_user)) -> InviteUserResponse:
+async def invite_user(
+    req: InviteUserRequest,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> InviteUserResponse:
     """Invite a new user by email."""
-    global _next_user_id
-
-    # Check for duplicate email
-    if any(u["email"] == req.email for u in _STUB_USERS):
-        raise HTTPException(status_code=409, detail="User with this email already exists")
-
     # Validate role
     valid_roles = {r.value for r in Role}
     if req.role not in valid_roles:
         raise HTTPException(status_code=400, detail=f"Invalid role: {req.role}")
 
-    user_id = f"usr-new-{_next_user_id:03d}"
-    _next_user_id += 1
+    # Check for duplicate email within tenant
+    existing = await db.execute(
+        select(UserModel)
+        .where(UserModel.tenant_id == _user.tenant_id)
+        .where(UserModel.email == req.email)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="User with this email already exists")
 
-    _STUB_USERS.append({
-        "user_id": user_id,
-        "email": req.email,
-        "display_name": req.display_name,
-        "role": req.role,
-        "status": "invited",
-        "last_active": None,
-        "created_at": "2026-04-12T12:00:00Z",
-    })
+    user_id = str(uuid4())
+    new_user = UserModel(
+        id=user_id,
+        tenant_id=_user.tenant_id,
+        email=req.email,
+        display_name=req.display_name,
+        role=req.role,
+        is_active=True,
+    )
+    db.add(new_user)
+    await db.commit()
 
     log_auth_event("admin.user_invited", f"Invited {req.email} as {req.role}")
 
@@ -173,67 +155,146 @@ async def invite_user(req: InviteUserRequest, _user: TokenPayload = Depends(get_
 
 
 @router.patch("/users/{user_id}/role")
-async def update_user_role(user_id: str, req: UpdateRoleRequest, _user: TokenPayload = Depends(get_current_user)) -> dict:
+async def update_user_role(
+    user_id: str,
+    req: UpdateRoleRequest,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """Update a user's role."""
     valid_roles = {r.value for r in Role}
     if req.role not in valid_roles:
         raise HTTPException(status_code=400, detail=f"Invalid role: {req.role}")
 
-    user = next((u for u in _STUB_USERS if u["user_id"] == user_id), None)
+    result = await db.execute(
+        select(UserModel)
+        .where(UserModel.id == user_id)
+        .where(UserModel.tenant_id == _user.tenant_id)
+    )
+    user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    old_role = user["role"]
-    user["role"] = req.role
-    log_auth_event("admin.role_changed", f"{user['email']}: {old_role} → {req.role}")
+    old_role = user.role
+    user.role = req.role
+    await db.commit()
+
+    log_auth_event("admin.role_changed", f"{user.email}: {old_role} -> {req.role}")
 
     return {"user_id": user_id, "role": req.role, "message": "Role updated"}
 
 
 @router.post("/users/{user_id}/deactivate")
-async def deactivate_user(user_id: str, _user: TokenPayload = Depends(get_current_user)) -> dict:
+async def deactivate_user(
+    user_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """Deactivate a user account."""
-    user = next((u for u in _STUB_USERS if u["user_id"] == user_id), None)
+    result = await db.execute(
+        select(UserModel)
+        .where(UserModel.id == user_id)
+        .where(UserModel.tenant_id == _user.tenant_id)
+    )
+    user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user["status"] = "deactivated"
-    log_auth_event("admin.user_deactivated", f"Deactivated {user['email']}")
+    user.is_active = False
+    await db.commit()
+
+    log_auth_event("admin.user_deactivated", f"Deactivated {user.email}")
 
     return {"user_id": user_id, "status": "deactivated", "message": "User deactivated"}
 
 
 @router.post("/users/{user_id}/activate")
-async def activate_user(user_id: str, _user: TokenPayload = Depends(get_current_user)) -> dict:
+async def activate_user(
+    user_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """Reactivate a deactivated user account."""
-    user = next((u for u in _STUB_USERS if u["user_id"] == user_id), None)
+    result = await db.execute(
+        select(UserModel)
+        .where(UserModel.id == user_id)
+        .where(UserModel.tenant_id == _user.tenant_id)
+    )
+    user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user["status"] = "active"
-    log_auth_event("admin.user_activated", f"Activated {user['email']}")
+    user.is_active = True
+    await db.commit()
+
+    log_auth_event("admin.user_activated", f"Activated {user.email}")
 
     return {"user_id": user_id, "status": "active", "message": "User activated"}
 
 
 @router.get("/sso", response_model=SSOConfigResponse)
-async def get_sso_config(_user: TokenPayload = Depends(get_current_user)) -> SSOConfigResponse:
+async def get_sso_config(
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SSOConfigResponse:
     """Get current SSO configuration."""
-    return SSOConfigResponse(**_SSO_CONFIG)
+    result = await db.execute(
+        select(SSOConfig).where(SSOConfig.tenant_id == _user.tenant_id)
+    )
+    config = result.scalar_one_or_none()
+    if not config:
+        return SSOConfigResponse(
+            oidc_google_enabled=False,
+            oidc_google_client_id=None,
+            saml_microsoft_enabled=False,
+            saml_microsoft_entity_id=None,
+        )
+
+    return SSOConfigResponse(
+        oidc_google_enabled=config.oidc_google_enabled,
+        oidc_google_client_id=config.oidc_google_client_id,
+        saml_microsoft_enabled=config.saml_microsoft_enabled,
+        saml_microsoft_entity_id=config.saml_microsoft_entity_id,
+    )
 
 
 @router.put("/sso")
-async def update_sso_config(req: UpdateSSOConfigRequest, _user: TokenPayload = Depends(get_current_user)) -> dict:
+async def update_sso_config(
+    req: UpdateSSOConfigRequest,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """Update SSO configuration."""
+    result = await db.execute(
+        select(SSOConfig).where(SSOConfig.tenant_id == _user.tenant_id)
+    )
+    config = result.scalar_one_or_none()
+
+    if not config:
+        config = SSOConfig(
+            id=str(uuid4()),
+            tenant_id=_user.tenant_id,
+        )
+        db.add(config)
+
     if req.oidc_google_enabled is not None:
-        _SSO_CONFIG["oidc_google_enabled"] = req.oidc_google_enabled
+        config.oidc_google_enabled = req.oidc_google_enabled
     if req.oidc_google_client_id is not None:
-        _SSO_CONFIG["oidc_google_client_id"] = req.oidc_google_client_id
+        config.oidc_google_client_id = req.oidc_google_client_id
     if req.saml_microsoft_enabled is not None:
-        _SSO_CONFIG["saml_microsoft_enabled"] = req.saml_microsoft_enabled
+        config.saml_microsoft_enabled = req.saml_microsoft_enabled
     if req.saml_microsoft_entity_id is not None:
-        _SSO_CONFIG["saml_microsoft_entity_id"] = req.saml_microsoft_entity_id
+        config.saml_microsoft_entity_id = req.saml_microsoft_entity_id
+
+    config.updated_at = datetime.now(timezone.utc)
+    await db.commit()
 
     log_auth_event("admin.sso_updated", "SSO configuration updated")
 
-    return {"message": "SSO configuration updated", **_SSO_CONFIG}
+    return {
+        "message": "SSO configuration updated",
+        "oidc_google_enabled": config.oidc_google_enabled,
+        "oidc_google_client_id": config.oidc_google_client_id,
+        "saml_microsoft_enabled": config.saml_microsoft_enabled,
+        "saml_microsoft_entity_id": config.saml_microsoft_entity_id,
+    }

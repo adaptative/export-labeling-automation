@@ -4,52 +4,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import OrderItem, ItemState
 from labelforge.core.auth import TokenPayload
+from labelforge.db.models import OrderItemModel
+from labelforge.db.session import get_db
 
 router = APIRouter(prefix="/items", tags=["items"])
-
-# ── Mock data ────────────────────────────────────────────────────────────────
-
-_NOW = datetime(2026, 4, 10, 14, 30, 0, tzinfo=timezone.utc)
-
-_MOCK_ITEMS: list[OrderItem] = [
-    OrderItem(
-        id="item-001",
-        order_id="ORD-2026-0042",
-        item_no="A1001",
-        state=ItemState.COMPLIANCE_EVAL,
-        state_changed_at=_NOW,
-        rules_snapshot_id="snap-r1",
-    ),
-    OrderItem(
-        id="item-002",
-        order_id="ORD-2026-0042",
-        item_no="A1002",
-        state=ItemState.FUSED,
-        state_changed_at=_NOW,
-        rules_snapshot_id="snap-r1",
-    ),
-    OrderItem(
-        id="item-003",
-        order_id="ORD-2026-0043",
-        item_no="B2001",
-        state=ItemState.DELIVERED,
-        state_changed_at=_NOW,
-        rules_snapshot_id="snap-r2",
-    ),
-    OrderItem(
-        id="item-004",
-        order_id="ORD-2026-0044",
-        item_no="C3001",
-        state=ItemState.HUMAN_BLOCKED,
-        state_changed_at=_NOW,
-        rules_snapshot_id="snap-r3",
-    ),
-]
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -62,20 +27,60 @@ async def list_items(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> list[OrderItem]:
     """List all items with optional filtering."""
-    results = _MOCK_ITEMS
+    stmt = (
+        select(OrderItemModel)
+        .where(OrderItemModel.tenant_id == _user.tenant_id)
+    )
+
     if state is not None:
-        results = [i for i in results if i.state == state]
+        stmt = stmt.where(OrderItemModel.state == state.value)
+
     if order_id:
-        results = [i for i in results if i.order_id == order_id]
-    return results[offset : offset + limit]
+        stmt = stmt.where(OrderItemModel.order_id == order_id)
+
+    stmt = stmt.order_by(OrderItemModel.created_at.desc()).offset(offset).limit(limit)
+
+    result = await db.execute(stmt)
+    items = result.scalars().all()
+
+    return [
+        OrderItem(
+            id=i.id,
+            order_id=i.order_id,
+            item_no=i.item_no,
+            state=i.state,
+            state_changed_at=i.state_changed_at or datetime.now(tz=timezone.utc),
+            rules_snapshot_id=i.rules_snapshot_id,
+        )
+        for i in items
+    ]
 
 
 @router.get("/{item_id}", response_model=OrderItem)
-async def get_item(item_id: str, _user: TokenPayload = Depends(get_current_user)) -> OrderItem:
+async def get_item(
+    item_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> OrderItem:
     """Get a single item by ID."""
-    item = next((i for i in _MOCK_ITEMS if i.id == item_id), None)
+    stmt = select(OrderItemModel).where(
+        OrderItemModel.id == item_id,
+        OrderItemModel.tenant_id == _user.tenant_id,
+    )
+    result = await db.execute(stmt)
+    item = result.scalar_one_or_none()
+
     if item is None:
-        return _MOCK_ITEMS[0]
-    return item
+        raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
+
+    return OrderItem(
+        id=item.id,
+        order_id=item.order_id,
+        item_no=item.item_no,
+        state=item.state,
+        state_changed_at=item.state_changed_at or datetime.now(tz=timezone.utc),
+        rules_snapshot_id=item.rules_snapshot_id,
+    )

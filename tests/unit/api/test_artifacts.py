@@ -48,7 +48,7 @@ class TestListArtifacts:
         assert resp.json()["total"] >= 1
 
     def test_filter_by_order_id(self):
-        resp = client.get(PREFIX, params={"order_id": "PO-2065"}, headers=_AUTH)
+        resp = client.get(PREFIX, params={"order_id": "ORD-2026-0042"}, headers=_AUTH)
         assert resp.status_code == 200
         assert resp.json()["total"] == 2
 

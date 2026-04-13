@@ -4,11 +4,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelforge.api.v1.auth import get_current_user
 from labelforge.core.auth import TokenPayload
+from labelforge.db.models import WarningLabel as WarningLabelModel
+from labelforge.db.session import get_db
 
 router = APIRouter(prefix="/warning-labels", tags=["warning-labels"])
 
@@ -33,65 +37,21 @@ class WarningLabelListResponse(BaseModel):
     total: int
 
 
-# ── Mock data ────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-_MOCK_LABELS: list[WarningLabel] = [
-    WarningLabel(
-        id="wl-001",
-        code="PROP65_CANCER",
-        title="Proposition 65 Cancer Warning",
-        text="WARNING: This product can expose you to chemicals including lead, which is known to the State of California to cause cancer. For more information go to www.P65Warnings.ca.gov.",
-        region="US-CA",
-        placement="product",
-        icon_asset_hash="sha256:prop65icon01",
-        active=True,
-        updated_at=datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc),
-    ),
-    WarningLabel(
-        id="wl-002",
-        code="PROP65_REPRO",
-        title="Proposition 65 Reproductive Harm Warning",
-        text="WARNING: This product can expose you to chemicals including DEHP, which is known to the State of California to cause birth defects or other reproductive harm. For more information go to www.P65Warnings.ca.gov.",
-        region="US-CA",
-        placement="product",
-        icon_asset_hash="sha256:prop65icon02",
-        active=True,
-        updated_at=datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc),
-    ),
-    WarningLabel(
-        id="wl-003",
-        code="CHOKING_SMALL_PARTS",
-        title="Choking Hazard - Small Parts",
-        text="WARNING: CHOKING HAZARD - Small parts. Not for children under 3 years.",
-        region="US",
-        placement="both",
-        icon_asset_hash="sha256:chokingicon01",
-        active=True,
-        updated_at=datetime(2026, 2, 15, 0, 0, 0, tzinfo=timezone.utc),
-    ),
-    WarningLabel(
-        id="wl-004",
-        code="CHOKING_SMALL_BALL",
-        title="Choking Hazard - Small Ball",
-        text="WARNING: CHOKING HAZARD - This toy is a small ball. Not for children under 3 years.",
-        region="US",
-        placement="both",
-        icon_asset_hash="sha256:chokingicon02",
-        active=True,
-        updated_at=datetime(2026, 2, 15, 0, 0, 0, tzinfo=timezone.utc),
-    ),
-    WarningLabel(
-        id="wl-005",
-        code="FCC_PART15",
-        title="FCC Part 15 Compliance Statement",
-        text="This device complies with Part 15 of the FCC Rules. Operation is subject to the following two conditions: (1) this device may not cause harmful interference, and (2) this device must accept any interference received, including interference that may cause undesired operation.",
-        region="US",
-        placement="carton",
-        icon_asset_hash=None,
-        active=True,
-        updated_at=datetime(2026, 1, 20, 0, 0, 0, tzinfo=timezone.utc),
-    ),
-]
+
+def _model_to_response(w: WarningLabelModel) -> WarningLabel:
+    return WarningLabel(
+        id=w.id,
+        code=w.code,
+        title=w.title,
+        text=w.text_en,
+        region=w.region,
+        placement=w.placement,
+        icon_asset_hash=w.icon_asset_hash,
+        active=w.is_active,
+        updated_at=w.updated_at or w.created_at,
+    )
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -106,18 +66,53 @@ async def list_warning_labels(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> WarningLabelListResponse:
     """List warning labels with optional filtering."""
-    results = _MOCK_LABELS
+    query = select(WarningLabelModel).where(WarningLabelModel.tenant_id == _user.tenant_id)
+    count_query = select(func.count()).select_from(WarningLabelModel).where(WarningLabelModel.tenant_id == _user.tenant_id)
+
     if region:
-        results = [wl for wl in results if wl.region == region]
+        query = query.where(WarningLabelModel.region == region)
+        count_query = count_query.where(WarningLabelModel.region == region)
     if placement:
-        results = [wl for wl in results if wl.placement == placement]
+        query = query.where(WarningLabelModel.placement == placement)
+        count_query = count_query.where(WarningLabelModel.placement == placement)
     if code:
-        results = [wl for wl in results if wl.code == code]
+        query = query.where(WarningLabelModel.code == code)
+        count_query = count_query.where(WarningLabelModel.code == code)
     if active is not None:
-        results = [wl for wl in results if wl.active == active]
-    total = len(results)
+        query = query.where(WarningLabelModel.is_active == active)
+        count_query = count_query.where(WarningLabelModel.is_active == active)
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar_one()
+
+    query = query.order_by(WarningLabelModel.code).offset(offset).limit(limit)
+    result = await db.execute(query)
+    labels = result.scalars().all()
+
     return WarningLabelListResponse(
-        warning_labels=results[offset : offset + limit], total=total
+        warning_labels=[_model_to_response(w) for w in labels],
+        total=total,
     )
+
+
+@router.get("/{label_id}", response_model=WarningLabel)
+async def get_warning_label(
+    label_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WarningLabel:
+    """Get a single warning label by ID."""
+    result = await db.execute(
+        select(WarningLabelModel).where(
+            WarningLabelModel.id == label_id,
+            WarningLabelModel.tenant_id == _user.tenant_id,
+        )
+    )
+    label = result.scalar_one_or_none()
+    if label is None:
+        raise HTTPException(status_code=404, detail="Warning label not found")
+
+    return _model_to_response(label)

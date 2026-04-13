@@ -7,7 +7,8 @@ Tables (17):
   audit_log, notifications
 
 NOTE: ``orders`` has **no** ``state`` column — the aggregate order state is
-derived via the ``order_state_v`` materialized view.
+derived via the ``order_state_v`` materialized view (PostgreSQL) or computed
+in Python (SQLite).
 """
 import enum
 from datetime import datetime
@@ -22,13 +23,12 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
     func,
-    text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from labelforge.db.base import Base
@@ -96,7 +96,7 @@ def _utcnow():
 class Tenant(Base):
     __tablename__ = "tenants"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -110,13 +110,20 @@ class Tenant(Base):
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="viewer")
     hashed_password: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="UTC")
+    language: Mapped[str] = mapped_column(String(10), nullable=False, default="en")
+    last_active: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    mfa_method: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    mfa_secret: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow(), onupdate=_utcnow())
 
@@ -131,8 +138,8 @@ class User(Base):
 class Importer(Base):
     __tablename__ = "importers"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     code: Mapped[str] = mapped_column(String(100), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -146,14 +153,14 @@ class Importer(Base):
 class ImporterProfileModel(Base):
     __tablename__ = "importer_profiles"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    importer_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("importers.id"), nullable=False, index=True)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    importer_id: Mapped[str] = mapped_column(String(36), ForeignKey("importers.id"), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    brand_treatment: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    panel_layouts: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    handling_symbol_rules: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    pi_template_mapping: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    brand_treatment: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    panel_layouts: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    handling_symbol_rules: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    pi_template_mapping: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     logo_asset_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
@@ -168,9 +175,10 @@ class ImporterProfileModel(Base):
 class Order(Base):
     __tablename__ = "orders"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
-    importer_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("importers.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    importer_id: Mapped[str] = mapped_column(String(36), ForeignKey("importers.id"), nullable=False, index=True)
+    po_number: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     external_ref: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
@@ -185,14 +193,14 @@ class Order(Base):
 class OrderItemModel(Base):
     __tablename__ = "order_items"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    order_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    order_id: Mapped[str] = mapped_column(String(36), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     item_no: Mapped[str] = mapped_column(String(50), nullable=False)
     state: Mapped[str] = mapped_column(String(32), nullable=False, default=ItemStateEnum.CREATED.value)
     state_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
-    rules_snapshot_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True)
-    data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    rules_snapshot_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
     order: Mapped["Order"] = relationship("Order", back_populates="items")
@@ -209,9 +217,9 @@ class OrderItemModel(Base):
 class Document(Base):
     __tablename__ = "documents"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
-    order_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    order_id: Mapped[str] = mapped_column(String(36), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     content_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
@@ -222,9 +230,9 @@ class Document(Base):
 class DocumentClassification(Base):
     __tablename__ = "documents_classification"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    document_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     doc_class: Mapped[str] = mapped_column(String(50), nullable=False, default=DocumentClassEnum.UNKNOWN.value)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     classified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
@@ -236,14 +244,18 @@ class DocumentClassification(Base):
 class ComplianceRule(Base):
     __tablename__ = "compliance_rules"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     rule_code: Mapped[str] = mapped_column(String(100), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    logic: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    region: Mapped[str] = mapped_column(String(50), nullable=False, default="US")
+    placement: Mapped[str] = mapped_column(String(50), nullable=False, default="both")
+    logic: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow(), onupdate=_utcnow())
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "rule_code", "version", name="uq_compliance_rules_tenant_code_version"),
@@ -253,9 +265,9 @@ class ComplianceRule(Base):
 class RulesSnapshot(Base):
     __tablename__ = "rules_snapshots"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
-    snapshot_data: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    snapshot_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
 
@@ -265,15 +277,20 @@ class RulesSnapshot(Base):
 class WarningLabel(Base):
     __tablename__ = "warning_labels"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     code: Mapped[str] = mapped_column(String(100), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     text_en: Mapped[str] = mapped_column(Text, nullable=False)
     text_es: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     text_fr: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    region: Mapped[str] = mapped_column(String(50), nullable=False, default="US")
+    placement: Mapped[str] = mapped_column(String(50), nullable=False, default="both")
+    icon_asset_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     svg_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow(), onupdate=_utcnow())
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "code", name="uq_warning_labels_tenant_code"),
@@ -286,13 +303,15 @@ class WarningLabel(Base):
 class Artifact(Base):
     __tablename__ = "artifacts"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
-    order_item_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("order_items.id", ondelete="CASCADE"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    order_item_id: Mapped[str] = mapped_column(String(36), ForeignKey("order_items.id", ondelete="CASCADE"), nullable=False, index=True)
     artifact_type: Mapped[str] = mapped_column(String(100), nullable=False)
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
-    provenance: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mime_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    provenance: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
 
@@ -302,9 +321,9 @@ class Artifact(Base):
 class HiTLThreadModel(Base):
     __tablename__ = "hitl_threads"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
-    order_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    order_id: Mapped[str] = mapped_column(String(36), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
     item_no: Mapped[str] = mapped_column(String(50), nullable=False)
     agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
     priority: Mapped[str] = mapped_column(String(10), nullable=False, default="P2")
@@ -323,12 +342,12 @@ class HiTLThreadModel(Base):
 class HiTLMessageModel(Base):
     __tablename__ = "hitl_messages"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    thread_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("hitl_threads.id", ondelete="CASCADE"), nullable=False, index=True)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    thread_id: Mapped[str] = mapped_column(String(36), ForeignKey("hitl_threads.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     sender_type: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    context: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    context: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
     thread: Mapped["HiTLThreadModel"] = relationship("HiTLThreadModel", back_populates="messages")
@@ -340,14 +359,14 @@ class HiTLMessageModel(Base):
 class CostEvent(Base):
     __tablename__ = "cost_events"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     scope: Mapped[str] = mapped_column(String(50), nullable=False)
     amount_usd: Mapped[float] = mapped_column(Float, nullable=False)
     model_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    metadata_: Mapped[Optional[dict]] = mapped_column("metadata", JSONB, nullable=True)
+    metadata_: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
     __table_args__ = (
@@ -361,13 +380,16 @@ class CostEvent(Base):
 class AuditLog(Base):
     __tablename__ = "audit_log"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
-    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    actor: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    actor_type: Mapped[str] = mapped_column(String(20), nullable=False, default="system")
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(100), nullable=False)
     resource_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    details: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    details: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
@@ -382,17 +404,65 @@ class AuditLog(Base):
 class Notification(Base):
     __tablename__ = "notifications"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False, index=True)
-    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    type: Mapped[str] = mapped_column(String(50), nullable=False, default="info")
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     level: Mapped[str] = mapped_column(String(20), nullable=False, default="info")
+    order_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    item_no: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
 
-# ── Materialized view SQL (executed in migration) ────────────────────────────
+# ── SSO Config ───────────────────────────────────────────────────────────────
+
+
+class SSOConfig(Base):
+    __tablename__ = "sso_configs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    oidc_google_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    oidc_google_client_id: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    saml_microsoft_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    saml_microsoft_entity_id: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow(), onupdate=_utcnow())
+
+
+# ── Budget Tiers ─────────────────────────────────────────────────────────────
+
+
+class BudgetTier(Base):
+    __tablename__ = "budget_tiers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    cap: Mapped[float] = mapped_column(Float, nullable=False)
+    unit: Mapped[str] = mapped_column(String(50), nullable=False)
+    breaker_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow(), onupdate=_utcnow())
+
+
+class BreakerEvent(Base):
+    __tablename__ = "breaker_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    tier_id: Mapped[str] = mapped_column(String(36), ForeignKey("budget_tiers.id"), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    triggered_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    action: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
+
+
+# ── Materialized view SQL (PostgreSQL only) ─────────────────────────────────
 
 ORDER_STATE_V_SQL = """
 CREATE MATERIALIZED VIEW IF NOT EXISTS order_state_v AS

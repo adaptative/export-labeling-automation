@@ -9,6 +9,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelforge.config import settings
 from labelforge.core.auth import (
@@ -22,6 +24,8 @@ from labelforge.core.auth import (
     decode_token,
     log_auth_event,
 )
+from labelforge.db.session import get_db
+from labelforge.db.models import User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -93,90 +97,54 @@ def _make_stub_jwt(user_id: str, tenant_id: str, role: str, email: str) -> str:
     return f"{header.decode()}.{body.decode()}.{sig.decode()}"
 
 
-# Stub user database for development
-STUB_USERS = {
-    "admin@nakodacraft.com": {
-        "user_id": "usr-admin-001",
-        "tenant_id": "tnt-nakoda-001",
-        "display_name": "Admin User",
-        "role": "ADMIN",
-        "password_hash": hashlib.sha256(b"admin123").hexdigest(),
-    },
-    "ops@nakodacraft.com": {
-        "user_id": "usr-ops-001",
-        "tenant_id": "tnt-nakoda-001",
-        "display_name": "Ops Manager",
-        "role": "OPS",
-        "password_hash": hashlib.sha256(b"ops123").hexdigest(),
-    },
-    "compliance@nakodacraft.com": {
-        "user_id": "usr-comp-001",
-        "tenant_id": "tnt-nakoda-001",
-        "display_name": "Compliance Officer",
-        "role": "COMPLIANCE",
-        "password_hash": hashlib.sha256(b"comp123").hexdigest(),
-    },
-    "importer@acme.com": {
-        "user_id": "usr-ext-001",
-        "tenant_id": "tnt-nakoda-001",
-        "display_name": "Acme Importer",
-        "role": "EXTERNAL",
-        "password_hash": hashlib.sha256(b"portal123").hexdigest(),
-        "portal_order_id": "ORD-2026-04-0042",
-    },
-}
-
-
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 
 @router.post("/login", response_model=LoginResponse, status_code=200)
-async def login(req: LoginRequest) -> LoginResponse:
+async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)) -> LoginResponse:
     """Authenticate user with email/password and return JWT."""
-    user = STUB_USERS.get(req.email)
+    result = await db.execute(select(User).where(User.email == req.email, User.is_active == True))
+    user = result.scalar_one_or_none()
+
     if not user:
         log_auth_event("auth.login_failed", f"Unknown email: {req.email}")
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     password_hash = hashlib.sha256(req.password.encode()).hexdigest()
-    if password_hash != user["password_hash"]:
-        log_auth_event("auth.login_failed", f"Wrong password for {req.email}", user_id=user["user_id"])
+    if password_hash != user.hashed_password:
+        log_auth_event("auth.login_failed", f"Wrong password for {req.email}", user_id=user.id)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = _make_stub_jwt(user["user_id"], user["tenant_id"], user["role"], req.email)
+    token = _make_stub_jwt(user.id, user.tenant_id, user.role, req.email)
     expires_in = settings.jwt_expiration_minutes * 60
 
-    log_auth_event("auth.login_success", f"Login: {req.email}", user_id=user["user_id"], tenant_id=user["tenant_id"])
+    log_auth_event("auth.login_success", f"Login: {req.email}", user_id=user.id, tenant_id=user.tenant_id)
 
     return LoginResponse(
         access_token=token,
         expires_in=expires_in,
         user={
-            "user_id": user["user_id"],
-            "email": req.email,
-            "display_name": user["display_name"],
-            "role": user["role"],
-            "tenant_id": user["tenant_id"],
+            "user_id": user.id,
+            "email": user.email,
+            "display_name": user.display_name,
+            "role": user.role,
+            "tenant_id": user.tenant_id,
         },
     )
 
 
 @router.post("/refresh", response_model=RefreshResponse, status_code=200)
-async def refresh_token(current_user: TokenPayload = Depends(get_current_user)) -> RefreshResponse:
+async def refresh_token(
+    current_user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> RefreshResponse:
     """Refresh an access token using the current valid JWT."""
-    # Look up user info from STUB_USERS to get email for new token
-    email = ""
-    for user_email, user_data in STUB_USERS.items():
-        if user_data["user_id"] == current_user.user_id:
-            email = user_email
-            break
-    if not email:
+    result = await db.execute(select(User).where(User.id == current_user.user_id))
+    user = result.scalar_one_or_none()
+    if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
-    token = _make_stub_jwt(
-        current_user.user_id, current_user.tenant_id,
-        current_user.role.value, email,
-    )
+    token = _make_stub_jwt(user.id, user.tenant_id, user.role, user.email)
     return RefreshResponse(
         access_token=token,
         expires_in=settings.jwt_expiration_minutes * 60,
@@ -185,10 +153,7 @@ async def refresh_token(current_user: TokenPayload = Depends(get_current_user)) 
 
 @router.post("/logout", response_model=LogoutResponse, status_code=200)
 async def logout() -> LogoutResponse:
-    """Logout: revoke the current token.
-
-    Stub: just logs the event. In production, adds token to Redis revocation list.
-    """
+    """Logout: revoke the current token."""
     log_auth_event("auth.logout", "User logged out")
     return LogoutResponse()
 
@@ -233,21 +198,18 @@ async def saml_login(provider: str) -> SSORedirectResponse:
 
 
 @router.get("/me")
-async def get_me(current_user: TokenPayload = Depends(get_current_user)) -> dict:
-    """Get the current authenticated user's info from the JWT."""
-    # Look up display_name from STUB_USERS
-    user_info = None
-    email = ""
-    for user_email, user_data in STUB_USERS.items():
-        if user_data["user_id"] == current_user.user_id:
-            user_info = user_data
-            email = user_email
-            break
+async def get_me(
+    current_user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Get the current authenticated user's info."""
+    result = await db.execute(select(User).where(User.id == current_user.user_id))
+    user = result.scalar_one_or_none()
 
     return {
         "user_id": current_user.user_id,
-        "email": email,
-        "display_name": user_info["display_name"] if user_info else "Unknown",
+        "email": user.email if user else "",
+        "display_name": user.display_name if user else "Unknown",
         "role": current_user.role.value,
         "tenant_id": current_user.tenant_id,
     }

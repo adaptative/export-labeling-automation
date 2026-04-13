@@ -4,12 +4,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelforge.api.v1.auth import get_current_user
-from labelforge.contracts import OrderItem, OrderState, ItemState
+from labelforge.contracts import (
+    OrderItem,
+    OrderState,
+    ItemState,
+    compute_order_state,
+    OrderItem as ContractOrderItem,
+)
 from labelforge.core.auth import TokenPayload
+from labelforge.db.models import Order, OrderItemModel
+from labelforge.db.session import get_db
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -36,66 +46,24 @@ class OrderListResponse(BaseModel):
     total: int
 
 
-# ── Mock data ────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-_NOW = datetime(2026, 4, 10, 14, 30, 0, tzinfo=timezone.utc)
 
-_MOCK_ITEMS: list[OrderItem] = [
-    OrderItem(
-        id="item-001",
-        order_id="ORD-2026-0042",
-        item_no="A1001",
-        state=ItemState.COMPLIANCE_EVAL,
-        state_changed_at=_NOW,
-        rules_snapshot_id="snap-r1",
-    ),
-    OrderItem(
-        id="item-002",
-        order_id="ORD-2026-0042",
-        item_no="A1002",
-        state=ItemState.FUSED,
-        state_changed_at=_NOW,
-        rules_snapshot_id="snap-r1",
-    ),
-    OrderItem(
-        id="item-003",
-        order_id="ORD-2026-0043",
-        item_no="B2001",
-        state=ItemState.DELIVERED,
-        state_changed_at=_NOW,
-        rules_snapshot_id="snap-r2",
-    ),
-]
-
-_MOCK_ORDERS: list[OrderSummary] = [
-    OrderSummary(
-        id="ORD-2026-0042",
-        importer_id="IMP-ACME",
-        po_number="PO-88210",
-        state=OrderState.IN_PROGRESS,
-        item_count=2,
-        created_at=datetime(2026, 4, 8, 9, 0, 0, tzinfo=timezone.utc),
-        updated_at=_NOW,
-    ),
-    OrderSummary(
-        id="ORD-2026-0043",
-        importer_id="IMP-GLOBEX",
-        po_number="PO-77301",
-        state=OrderState.DELIVERED,
-        item_count=1,
-        created_at=datetime(2026, 4, 5, 11, 0, 0, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 4, 9, 16, 0, 0, tzinfo=timezone.utc),
-    ),
-    OrderSummary(
-        id="ORD-2026-0044",
-        importer_id="IMP-ACME",
-        po_number="PO-88215",
-        state=OrderState.HUMAN_BLOCKED,
-        item_count=3,
-        created_at=datetime(2026, 4, 9, 8, 0, 0, tzinfo=timezone.utc),
-        updated_at=_NOW,
-    ),
-]
+def _compute_state(items: list) -> OrderState:
+    if not items:
+        return OrderState.CREATED
+    contract_items = [
+        ContractOrderItem(
+            id=i.id,
+            order_id=i.order_id,
+            item_no=i.item_no,
+            state=i.state,
+            state_changed_at=i.state_changed_at or datetime.now(tz=timezone.utc),
+            rules_snapshot_id=i.rules_snapshot_id,
+        )
+        for i in items
+    ]
+    return compute_order_state(contract_items)
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -108,33 +76,131 @@ async def list_orders(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> OrderListResponse:
     """List orders with optional filtering."""
-    results = _MOCK_ORDERS
-    if state is not None:
-        results = [o for o in results if o.state == state]
+    # Fetch all orders for the tenant with their items eagerly loaded
+    stmt = (
+        select(Order)
+        .where(Order.tenant_id == _user.tenant_id)
+        .order_by(Order.created_at.desc())
+    )
+
     if search:
-        q = search.lower()
-        results = [
-            o
-            for o in results
-            if q in o.id.lower() or q in o.po_number.lower()
-        ]
-    total = len(results)
-    return OrderListResponse(orders=results[offset : offset + limit], total=total)
+        q = f"%{search}%"
+        stmt = stmt.where(
+            (Order.po_number.ilike(q)) | (Order.id.ilike(q))
+        )
+
+    result = await db.execute(stmt)
+    orders = result.scalars().all()
+
+    # Build summaries with computed state
+    summaries: list[OrderSummary] = []
+    for order in orders:
+        items = order.items  # loaded via selectin relationship
+        computed = _compute_state(items)
+
+        # Apply state filter in Python since state is computed
+        if state is not None and computed != state:
+            continue
+
+        summaries.append(
+            OrderSummary(
+                id=order.id,
+                importer_id=order.importer_id,
+                po_number=order.po_number or "",
+                state=computed,
+                item_count=len(items),
+                created_at=order.created_at,
+                updated_at=order.updated_at,
+            )
+        )
+
+    total = len(summaries)
+    return OrderListResponse(orders=summaries[offset : offset + limit], total=total)
 
 
 @router.get("/{order_id}", response_model=OrderDetail)
-async def get_order(order_id: str, _user: TokenPayload = Depends(get_current_user)) -> OrderDetail:
+async def get_order(
+    order_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> OrderDetail:
     """Get a single order by ID."""
-    summary = next((o for o in _MOCK_ORDERS if o.id == order_id), None)
-    if summary is None:
-        summary = _MOCK_ORDERS[0]
-    items = [i for i in _MOCK_ITEMS if i.order_id == summary.id]
-    return OrderDetail(**summary.model_dump(), items=items)
+    stmt = select(Order).where(
+        Order.id == order_id,
+        Order.tenant_id == _user.tenant_id,
+    )
+    result = await db.execute(stmt)
+    order = result.scalar_one_or_none()
+
+    if order is None:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    items = order.items
+    computed = _compute_state(items)
+
+    order_items = [
+        OrderItem(
+            id=i.id,
+            order_id=i.order_id,
+            item_no=i.item_no,
+            state=i.state,
+            state_changed_at=i.state_changed_at or datetime.now(tz=timezone.utc),
+            rules_snapshot_id=i.rules_snapshot_id,
+        )
+        for i in items
+    ]
+
+    return OrderDetail(
+        id=order.id,
+        importer_id=order.importer_id,
+        po_number=order.po_number or "",
+        state=computed,
+        item_count=len(items),
+        created_at=order.created_at,
+        updated_at=order.updated_at,
+        items=order_items,
+    )
 
 
 @router.get("/{order_id}/items", response_model=list[OrderItem])
-async def list_order_items(order_id: str, _user: TokenPayload = Depends(get_current_user)) -> list[OrderItem]:
+async def list_order_items(
+    order_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[OrderItem]:
     """List all items belonging to an order."""
-    return [i for i in _MOCK_ITEMS if i.order_id == order_id]
+    # Verify order exists
+    order_check = await db.execute(
+        select(Order.id).where(
+            Order.id == order_id,
+            Order.tenant_id == _user.tenant_id,
+        )
+    )
+    if order_check.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    stmt = (
+        select(OrderItemModel)
+        .where(
+            OrderItemModel.order_id == order_id,
+            OrderItemModel.tenant_id == _user.tenant_id,
+        )
+        .order_by(OrderItemModel.item_no)
+    )
+    result = await db.execute(stmt)
+    items = result.scalars().all()
+
+    return [
+        OrderItem(
+            id=i.id,
+            order_id=i.order_id,
+            item_no=i.item_no,
+            state=i.state,
+            state_changed_at=i.state_changed_at or datetime.now(tz=timezone.utc),
+            rules_snapshot_id=i.rules_snapshot_id,
+        )
+        for i in items
+    ]

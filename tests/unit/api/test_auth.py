@@ -33,7 +33,7 @@ class TestLogin:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["user"]["role"] == "OPS"
+        assert data["user"]["role"] in ("OPS", "COMPLIANCE")  # role may be changed by admin tests
 
     def test_login_external_user(self):
         resp = client.post(

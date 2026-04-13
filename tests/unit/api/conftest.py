@@ -1,4 +1,4 @@
-"""Shared fixtures for API tests — provides auth helpers."""
+"""Shared fixtures for API tests — provides auth helpers and DB setup."""
 from __future__ import annotations
 
 import pytest
@@ -8,9 +8,11 @@ from labelforge.api.v1.auth import _make_stub_jwt
 from labelforge.app import app
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def client():
-    return TestClient(app)
+    """Test client with lifespan (creates tables + seeds data)."""
+    with TestClient(app) as c:
+        yield c
 
 
 @pytest.fixture
