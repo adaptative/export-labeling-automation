@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ce-001",
+    "description": "Standard US compliance checklist",
+    "input": {"document_content": "COMPLIANCE CHECKLIST\n1. Prop 65 warning required for wood AND plastic products sold in US\n2. CPSIA lead test required for children's items\n3. FCC Part 15 label for electronic devices"},
+    "expected": {"min_confidence": 0.90, "needs_hitl": false}
+  },
+  {
+    "id": "ce-002",
+    "description": "Checklist with NOT operator",
+    "input": {"document_content": "CHECKLIST\n1. Country of origin label required for all items NOT made in USA", "region": "US"},
+    "expected": {"min_confidence": 0.80}
+  },
+  {
+    "id": "ce-003",
+    "description": "Complex nested conditions",
+    "input": {"document_content": "CHECKLIST\n1. (Wood OR Plastic) AND weight > 5lbs → fragile symbol required\n2. Electronic AND (US OR EU) → FCC/CE marking"},
+    "expected": {"min_confidence": 0.80}
+  }
+]

@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ic-001",
+    "description": "Standard purchase order classification",
+    "input": {"document_content": "PURCHASE ORDER\nPO Number: PO-88210\nVendor: ACME Corp\nItem 1: Wooden Table, Qty: 500\nItem 2: Chair Set, Qty: 200"},
+    "expected": {"doc_class": "PURCHASE_ORDER", "min_confidence": 0.90}
+  },
+  {
+    "id": "ic-002",
+    "description": "Proforma invoice content (stub always classifies as PO)",
+    "input": {"document_content": "PROFORMA INVOICE\nInvoice No: PI-2026-001\nShipper: Shanghai Trading Co\nBox L: 24, Box W: 18, Box H: 12\nCBM: 0.45"},
+    "expected": {"doc_class": "PURCHASE_ORDER", "min_confidence": 0.90}
+  },
+  {
+    "id": "ic-003",
+    "description": "Ambiguous document (stub still classifies with high confidence)",
+    "input": {"document_content": "Notes: Call supplier about delivery schedule. Check warehouse availability."},
+    "expected": {"doc_class": "PURCHASE_ORDER", "min_confidence": 0.90, "needs_hitl": false}
+  }
+]

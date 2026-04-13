@@ -1,0 +1,54 @@
+[
+  {
+    "id": "pi-001",
+    "description": "Standard proforma invoice with template mapping",
+    "input": {
+      "rows": [
+        {"col_A": "A1001", "col_B": "24", "col_C": "18", "col_D": "12", "col_E": "50", "col_F": "9401.90"},
+        {"col_A": "A1002", "col_B": "20", "col_C": "20", "col_D": "36", "col_E": "30", "col_F": "9401.61"}
+      ],
+      "template_mapping": {
+        "item_no": "col_A",
+        "box_L": "col_B",
+        "box_W": "col_C",
+        "box_H": "col_D",
+        "total_cartons": "col_E",
+        "hs_code": "col_F"
+      }
+    },
+    "expected": {"item_count": 2, "confidence": 1.0, "needs_hitl": false}
+  },
+  {
+    "id": "pi-002",
+    "description": "PI with single item",
+    "input": {
+      "rows": [
+        {"col_A": "B001", "col_B": "36", "col_C": "12", "col_D": "8", "col_E": "100", "col_F": "9405.10"}
+      ],
+      "template_mapping": {
+        "item_no": "col_A",
+        "box_L": "col_B",
+        "box_W": "col_C",
+        "box_H": "col_D",
+        "total_cartons": "col_E",
+        "hs_code": "col_F"
+      }
+    },
+    "expected": {"item_count": 1, "confidence": 1.0}
+  },
+  {
+    "id": "pi-003",
+    "description": "PI with missing dimensions (still parses deterministically)",
+    "input": {
+      "rows": [
+        {"col_A": "C001", "col_E": "200", "col_F": "8471.30"}
+      ],
+      "template_mapping": {
+        "item_no": "col_A",
+        "total_cartons": "col_E",
+        "hs_code": "col_F"
+      }
+    },
+    "expected": {"item_count": 1, "confidence": 1.0}
+  }
+]

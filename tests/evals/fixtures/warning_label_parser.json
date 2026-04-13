@@ -1,0 +1,20 @@
+[
+  {
+    "id": "wl-001",
+    "description": "Prop 65 cancer warning extraction",
+    "input": {"document_content": "WARNING LABELS\nProp 65 Cancer: WARNING: This product can expose you to chemicals known to cause cancer.\nPlacement: Primary display panel\nApplies when: Contains listed chemicals"},
+    "expected": {"min_confidence": 0.95, "needs_hitl": false}
+  },
+  {
+    "id": "wl-002",
+    "description": "EU region labels",
+    "input": {"document_content": "CE marking requirements for electronic devices", "region": "EU"},
+    "expected": {"min_confidence": 0.80}
+  },
+  {
+    "id": "wl-003",
+    "description": "Ambiguous label text triggers HiTL",
+    "input": {"document_content": "Some warnings may apply, check regulations"},
+    "expected": {"needs_hitl": false}
+  }
+]
