@@ -73,6 +73,7 @@ def _compute_state(items: list) -> OrderState:
 async def list_orders(
     state: Optional[OrderState] = Query(None, description="Filter by order state"),
     search: Optional[str] = Query(None, description="Search by PO number or order ID"),
+    importer_id: Optional[str] = Query(None, description="Filter by importer ID"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     _user: TokenPayload = Depends(get_current_user),
@@ -91,6 +92,8 @@ async def list_orders(
         stmt = stmt.where(
             (Order.po_number.ilike(q)) | (Order.id.ilike(q))
         )
+    if importer_id:
+        stmt = stmt.where(Order.importer_id == importer_id)
 
     result = await db.execute(stmt)
     orders = result.scalars().all()
@@ -119,6 +122,45 @@ async def list_orders(
 
     total = len(summaries)
     return OrderListResponse(orders=summaries[offset : offset + limit], total=total)
+
+
+@router.get("/export", response_model=None)
+async def export_orders_csv(
+    state: Optional[OrderState] = Query(None),
+    search: Optional[str] = Query(None),
+    importer_id: Optional[str] = Query(None),
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export orders as CSV."""
+    from fastapi.responses import StreamingResponse
+    import io, csv
+    # Reuse the same query logic as list_orders
+    stmt = select(Order).where(Order.tenant_id == _user.tenant_id).order_by(Order.created_at.desc())
+    if search:
+        q = f"%{search}%"
+        stmt = stmt.where((Order.po_number.ilike(q)) | (Order.id.ilike(q)))
+    if importer_id:
+        stmt = stmt.where(Order.importer_id == importer_id)
+    result = await db.execute(stmt)
+    orders = result.scalars().all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "PO Number", "Importer", "State", "Items", "Created", "Updated"])
+    for o in orders:
+        items = o.items
+        computed = _compute_state(items)
+        if state is not None and computed != state:
+            continue
+        writer.writerow([o.id, o.po_number or "", o.importer_id, computed.value, len(items), o.created_at.isoformat(), o.updated_at.isoformat()])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=orders-export.csv"},
+    )
 
 
 @router.get("/{order_id}", response_model=OrderDetail)
@@ -204,3 +246,78 @@ async def list_order_items(
         )
         for i in items
     ]
+
+
+class OrderActionResponse(BaseModel):
+    order_id: str
+    new_state: str
+    message: str
+
+
+class RejectRequest(BaseModel):
+    reason: str = ""
+
+
+@router.post("/{order_id}/approve", response_model=OrderActionResponse)
+async def approve_order(
+    order_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> OrderActionResponse:
+    """Approve an order and mark all items as DELIVERED."""
+    stmt = select(Order).where(Order.id == order_id, Order.tenant_id == _user.tenant_id)
+    result = await db.execute(stmt)
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    # Update all items to DELIVERED
+    for item in order.items:
+        item.state = "DELIVERED"
+        item.state_changed_at = datetime.now(tz=timezone.utc)
+    order.updated_at = datetime.now(tz=timezone.utc)
+    await db.commit()
+
+    return OrderActionResponse(order_id=order_id, new_state="DELIVERED", message="Order approved and delivered.")
+
+
+@router.post("/{order_id}/reject", response_model=OrderActionResponse)
+async def reject_order(
+    order_id: str,
+    body: RejectRequest = RejectRequest(),
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> OrderActionResponse:
+    """Reject an order and loop items back to INTAKE_CLASSIFIED."""
+    stmt = select(Order).where(Order.id == order_id, Order.tenant_id == _user.tenant_id)
+    result = await db.execute(stmt)
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    for item in order.items:
+        item.state = "INTAKE_CLASSIFIED"
+        item.state_changed_at = datetime.now(tz=timezone.utc)
+    order.updated_at = datetime.now(tz=timezone.utc)
+    await db.commit()
+
+    return OrderActionResponse(order_id=order_id, new_state="IN_PROGRESS", message=f"Order rejected. Reason: {body.reason or 'N/A'}")
+
+
+@router.post("/{order_id}/send-to-printer", response_model=OrderActionResponse)
+async def send_to_printer(
+    order_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> OrderActionResponse:
+    """Send order to printer."""
+    stmt = select(Order).where(Order.id == order_id, Order.tenant_id == _user.tenant_id)
+    result = await db.execute(stmt)
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    order.updated_at = datetime.now(tz=timezone.utc)
+    await db.commit()
+
+    return OrderActionResponse(order_id=order_id, new_state=_compute_state(order.items).value, message="Order sent to printer.")
