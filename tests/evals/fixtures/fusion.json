@@ -1,10 +1,10 @@
 [
   {
     "id": "fus-001",
-    "description": "Clean merge of PO and PI items",
+    "description": "Clean merge — LLM infers material, cross-validates",
     "input": {
       "po_items": [
-        {"item_no": "A1001", "upc": "012345678905", "description": "Wooden Table", "case_qty": 10, "total_qty": 500}
+        {"item_no": "A1001", "upc": "012345678905", "description": "Wooden Table", "case_qty": "10", "total_qty": 500}
       ],
       "pi_items": [
         {"item_no": "A1001", "box_L": 24, "box_W": 18, "box_H": 12, "total_cartons": 50}
@@ -14,10 +14,10 @@
   },
   {
     "id": "fus-002",
-    "description": "Dimension mismatch triggers HiTL (product exceeds box)",
+    "description": "Dimension mismatch — LLM reasons about resolution, generates HiTL question",
     "input": {
       "po_items": [
-        {"item_no": "B001", "upc": "012345678905", "description": "Lamp", "product_dims": {"length": 12, "width": 12, "height": 24}, "case_qty": 5, "total_qty": 100}
+        {"item_no": "B001", "upc": "012345678905", "description": "Lamp", "product_dims": {"length": 12, "width": 12, "height": 24}, "case_qty": "5", "total_qty": 100}
       ],
       "pi_items": [
         {"item_no": "B001", "box_L": 8, "box_W": 8, "box_H": 10, "total_cartons": 20}
@@ -27,16 +27,59 @@
   },
   {
     "id": "fus-003",
-    "description": "Missing PI item triggers critical issue",
+    "description": "Missing PI item — LLM suggests resolution and HiTL question",
     "input": {
       "po_items": [
-        {"item_no": "C001", "upc": "012345678905", "description": "Widget", "case_qty": 10, "total_qty": 1000},
-        {"item_no": "C002", "upc": "012345678912", "description": "Gadget", "case_qty": 5, "total_qty": 500}
+        {"item_no": "C001", "upc": "012345678905", "description": "Widget", "case_qty": "10", "total_qty": 1000},
+        {"item_no": "C002", "upc": "012345678912", "description": "Gadget", "case_qty": "5", "total_qty": 500}
       ],
       "pi_items": [
         {"item_no": "C001", "box_L": 10, "box_W": 10, "box_H": 10, "total_cartons": 100}
       ]
     },
     "expected": {"needs_hitl": true}
+  },
+  {
+    "id": "fus-004",
+    "description": "Items with weight data — LLM validates plausibility",
+    "input": {
+      "po_items": [
+        {"item_no": "D001", "upc": "012345678905", "description": "Mug", "case_qty": "24", "total_qty": 480, "net_weight": 0.5}
+      ],
+      "pi_items": [
+        {"item_no": "D001", "box_L": 12, "box_W": 10, "box_H": 8, "total_cartons": 20}
+      ]
+    },
+    "expected": {"fused_count": 1, "needs_hitl": false, "min_confidence": 0.85}
+  },
+  {
+    "id": "fus-005",
+    "description": "Invalid UPC — LLM may auto-resolve with high-confidence suggestion",
+    "input": {
+      "po_items": [
+        {"item_no": "E001", "upc": "111111111111", "description": "Lamp", "case_qty": "5", "total_qty": 100}
+      ],
+      "pi_items": [
+        {"item_no": "E001", "box_L": 20, "box_W": 15, "box_H": 10, "total_cartons": 20}
+      ]
+    },
+    "expected": {"fused_count": 1, "needs_hitl": false, "min_confidence": 0.80}
+  },
+  {
+    "id": "fus-006",
+    "description": "Multi-item merge — LLM cross-validates for duplicates and anomalies",
+    "input": {
+      "po_items": [
+        {"item_no": "F001", "upc": "012345678905", "description": "Paper Mache Vase", "case_qty": "10", "total_qty": 300},
+        {"item_no": "F002", "upc": "012345678912", "description": "Paper Mache Bowl", "case_qty": "10", "total_qty": 200},
+        {"item_no": "F003", "upc": "012345678929", "description": "Reclaimed Wood Riser", "case_qty": "5", "total_qty": 67}
+      ],
+      "pi_items": [
+        {"item_no": "F001", "box_L": 17, "box_W": 17, "box_H": 26.5, "total_cartons": 30},
+        {"item_no": "F002", "box_L": 15, "box_W": 15, "box_H": 16, "total_cartons": 20},
+        {"item_no": "F003", "box_L": 28.5, "box_W": 18, "box_H": 20, "total_cartons": 67}
+      ]
+    },
+    "expected": {"fused_count": 3, "needs_hitl": false, "min_confidence": 0.90}
   }
 ]
