@@ -68,7 +68,7 @@ def cache_key(model: str, messages: Sequence[Dict[str, str]], **kwargs: Any) -> 
 
 
 class CompletionCache:
-    """In-memory completion cache. In production, backs to Redis."""
+    """In-memory completion cache."""
 
     def __init__(self) -> None:
         self._store: Dict[str, CompletionResult] = {}
@@ -84,11 +84,106 @@ class CompletionCache:
             self.misses += 1
         return result
 
+    async def aget(self, key: str) -> Optional[CompletionResult]:
+        """Async get — in-memory version delegates to sync get."""
+        return self.get(key)
+
     def put(self, key: str, result: CompletionResult) -> None:
         self._store[key] = result
 
+    async def aput(self, key: str, result: CompletionResult) -> None:
+        """Async put — in-memory version delegates to sync put."""
+        self.put(key, result)
+
     def clear(self) -> None:
         self._store.clear()
+        self.hits = 0
+        self.misses = 0
+
+
+REDIS_CACHE_TTL = 86400  # 24 hours default
+
+
+class RedisCompletionCache(CompletionCache):
+    """Redis-backed completion cache for production use.
+
+    Stores serialized CompletionResult as JSON in Redis with configurable TTL.
+    Falls back gracefully on Redis errors — logs warning and returns cache miss.
+    Tracks hits/misses for observability.
+    """
+
+    def __init__(self, redis_client, ttl: int = REDIS_CACHE_TTL, prefix: str = "llm:cache:") -> None:
+        super().__init__()
+        self._redis = redis_client
+        self._ttl = ttl
+        self._prefix = prefix
+
+    def _redis_key(self, key: str) -> str:
+        return f"{self._prefix}{key}"
+
+    def _serialize(self, result: CompletionResult) -> str:
+        return json.dumps({
+            "content": result.content,
+            "model": result.model,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "cost_usd": result.cost_usd,
+            "latency_ms": result.latency_ms,
+            "provider": result.provider,
+            "metadata": result.metadata,
+        })
+
+    def _deserialize(self, data: str) -> CompletionResult:
+        d = json.loads(data)
+        return CompletionResult(
+            content=d["content"],
+            model=d["model"],
+            input_tokens=d["input_tokens"],
+            output_tokens=d["output_tokens"],
+            cost_usd=d["cost_usd"],
+            latency_ms=d["latency_ms"],
+            cached=True,
+            provider=d.get("provider", ""),
+            metadata=d.get("metadata", {}),
+        )
+
+    def get(self, key: str) -> Optional[CompletionResult]:
+        """Sync get — not supported for Redis. Use aget() instead."""
+        self.misses += 1
+        return None
+
+    async def aget(self, key: str) -> Optional[CompletionResult]:
+        """Async get from Redis."""
+        try:
+            rkey = self._redis_key(key)
+            data = await self._redis.get(rkey)
+            if data is not None:
+                self.hits += 1
+                logger.debug("Redis cache hit: %s (hits=%d)", key[:16], self.hits)
+                return self._deserialize(data if isinstance(data, str) else data.decode())
+            self.misses += 1
+            return None
+        except Exception as exc:
+            logger.warning("Redis cache get failed: %s", exc)
+            self.misses += 1
+            return None
+
+    def put(self, key: str, result: CompletionResult) -> None:
+        """Sync put — not supported for Redis. Use aput() instead."""
+        pass
+
+    async def aput(self, key: str, result: CompletionResult) -> None:
+        """Async put to Redis with TTL."""
+        try:
+            rkey = self._redis_key(key)
+            data = self._serialize(result)
+            await self._redis.set(rkey, data, ex=self._ttl)
+            logger.debug("Redis cache put: %s (ttl=%ds)", key[:16], self._ttl)
+        except Exception as exc:
+            logger.warning("Redis cache put failed: %s", exc)
+
+    def clear(self) -> None:
+        """Clear counters. Redis keys expire via TTL."""
         self.hits = 0
         self.misses = 0
 
@@ -99,6 +194,12 @@ _default_cache = CompletionCache()
 
 def get_default_cache() -> CompletionCache:
     return _default_cache
+
+
+def set_default_cache(cache: CompletionCache) -> None:
+    """Replace the default cache (e.g., with RedisCompletionCache at startup)."""
+    global _default_cache
+    _default_cache = cache
 
 
 # ── Provider ABC ───────────────────────────────────────────────────────────
@@ -130,10 +231,10 @@ class LLMProvider(ABC):
         cache: Optional[CompletionCache] = None,
         **kwargs: Any,
     ) -> CompletionResult:
-        """Complete with caching support."""
+        """Complete with caching support. Works with both in-memory and Redis caches."""
         c = cache or _default_cache
         key = cache_key(model, messages, **kwargs)
-        cached = c.get(key)
+        cached = await c.aget(key)
         if cached:
             return CompletionResult(
                 content=cached.content,
@@ -147,7 +248,7 @@ class LLMProvider(ABC):
                 metadata=cached.metadata,
             )
         result = await self.complete(model, messages, **kwargs)
-        c.put(key, result)
+        await c.aput(key, result)
         return result
 
 
