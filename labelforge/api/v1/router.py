@@ -13,6 +13,7 @@ from labelforge.api.v1 import (
     documents,
     hitl,
     importers,
+    line_drawing,
     items,
     notifications,
     orders,
@@ -32,6 +33,7 @@ api_router.include_router(orders.router)
 api_router.include_router(items.router)
 api_router.include_router(documents.router)
 api_router.include_router(hitl.router)
+api_router.include_router(line_drawing.router)
 api_router.include_router(rules.router)
 api_router.include_router(importers.router)
 api_router.include_router(artifacts.router)
