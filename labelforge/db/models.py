@@ -169,6 +169,55 @@ class ImporterProfileModel(Base):
     )
 
 
+class ImporterDocument(Base):
+    """Documents uploaded as part of importer onboarding (protocol, warnings, checklist, etc.).
+
+    Distinct from ``Document`` which is bound to an ``order_id``.
+    Multiple versions of the same ``doc_type`` may exist; the highest ``version``
+    is treated as current.
+    """
+    __tablename__ = "importer_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    importer_id: Mapped[str] = mapped_column(String(36), ForeignKey("importers.id", ondelete="CASCADE"), nullable=False, index=True)
+    doc_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    content_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
+
+    __table_args__ = (
+        Index("ix_importer_documents_importer_type", "importer_id", "doc_type"),
+    )
+
+
+class ImporterOnboardingSession(Base):
+    """Tracks per-agent extraction progress for an importer onboarding upload.
+
+    ``agents_state`` is a JSON map of agent key → {status, confidence, data, error}.
+    Frontend polls GET /importers/{id}/onboarding/extraction while ``status`` is
+    ``in_progress``; finalize flips it to ``completed`` and writes an
+    ``ImporterProfileModel`` version.
+    """
+    __tablename__ = "importer_onboarding_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    importer_id: Mapped[str] = mapped_column(String(36), ForeignKey("importers.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="in_progress")
+    agents_state: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    extracted_values: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_importer_onboarding_importer", "importer_id"),
+    )
+
+
 # ── Order (NO state column) ─────────────────────────────────────────────────
 
 

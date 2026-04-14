@@ -70,7 +70,7 @@ class ProtocolAnalyzerAgent(BaseAgent):
             confidence=confidence,
             needs_hitl=needs_hitl,
             hitl_reason=hitl_reason,
-            cost=result.cost,
+            cost=getattr(result, "cost_usd", 0.0),
         )
 
     def _build_prompt(self, doc_content: str, images: list) -> str:
