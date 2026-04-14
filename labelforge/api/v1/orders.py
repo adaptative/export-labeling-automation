@@ -470,6 +470,40 @@ async def _run_item_extraction(
         _order_upload_logger.info("No items extracted from %s for order %s", filename, order_id)
         return
 
+    # ── Filter out footer/summary rows that lack a valid item_no ────────
+    # PI extractions often include totals rows and bank details at the bottom.
+    _JUNK_KEYWORDS = {"total", "usd", "bank", "pi no", "swift", "ifsc", "account", "amount", "nac/", "invoice"}
+    _valid_items: list[dict] = []
+    for item_data in items:
+        item_no = str(item_data.get("item_no", "")).strip()
+        if not item_no or item_no == "UNKNOWN":
+            continue
+        # Skip rows that look like summary text
+        _lower = item_no.lower()
+        if any(kw in _lower for kw in _JUNK_KEYWORDS):
+            continue
+        # For PI items: skip rows where item_no looks like a pure number
+        # (e.g. "4304" = total qty, "214.195..." = total CBM) and has no
+        # useful data in any field — likely a summary/totals row.
+        if doc_class == "PROFORMA_INVOICE":
+            try:
+                float(item_no)
+                # Pure numeric item_no — only reject if ALL data values are empty/None
+                _has_any_data = any(
+                    v for k, v in item_data.items()
+                    if k != "item_no" and v is not None and v != ""
+                )
+                if not _has_any_data:
+                    continue
+            except ValueError:
+                pass
+        _valid_items.append(item_data)
+    items = _valid_items
+
+    if not items:
+        _order_upload_logger.info("No valid items after filtering from %s for order %s", filename, order_id)
+        return
+
     _order_upload_logger.info(
         "Extracted %d items (doc_class=%s) from %s for order %s",
         len(items), doc_class, filename, order_id,
@@ -478,41 +512,54 @@ async def _run_item_extraction(
     # Persist items to DB
     try:
         async with async_session_factory() as db:
-            # Get existing item_nos to avoid duplicates
+            # Get existing items so we can merge PI data into PO items
             existing = await db.execute(
-                select(OrderItemModel.item_no).where(
+                select(OrderItemModel).where(
                     OrderItemModel.order_id == order_id,
                     OrderItemModel.tenant_id == tenant_id,
                 )
             )
-            existing_item_nos = {r[0] for r in existing.all()}
+            existing_items = {row.item_no: row for row in existing.scalars().all()}
 
             created = 0
+            merged = 0
             for item_data in items:
                 item_no = str(item_data.get("item_no", "")).strip()
-                if not item_no or item_no == "UNKNOWN":
-                    continue
-                if item_no in existing_item_nos:
-                    _order_upload_logger.debug("Item %s already exists in order %s, skipping", item_no, order_id)
+                if not item_no:
                     continue
 
-                new_item = OrderItemModel(
-                    id=f"itm-{uuid.uuid4().hex[:8]}",
-                    order_id=order_id,
-                    tenant_id=tenant_id,
-                    item_no=item_no,
-                    state=ItemStateEnum.PARSED.value,
-                    data=item_data,
-                )
-                db.add(new_item)
-                existing_item_nos.add(item_no)
-                created += 1
+                if item_no in existing_items:
+                    # Merge: update existing item's data with new fields
+                    # (e.g., PI adds box_L/W/H/total_cartons to PO item)
+                    existing_row = existing_items[item_no]
+                    current_data = dict(existing_row.data or {})
+                    for k, v in item_data.items():
+                        if v is not None and v != "" and (k not in current_data or not current_data[k]):
+                            current_data[k] = v
+                    existing_row.data = current_data
+                    merged += 1
+                    _order_upload_logger.debug(
+                        "Merged %s data into existing item %s in order %s",
+                        doc_class, item_no, order_id,
+                    )
+                else:
+                    new_item = OrderItemModel(
+                        id=f"itm-{uuid.uuid4().hex[:8]}",
+                        order_id=order_id,
+                        tenant_id=tenant_id,
+                        item_no=item_no,
+                        state=ItemStateEnum.PARSED.value,
+                        data=item_data,
+                    )
+                    db.add(new_item)
+                    existing_items[item_no] = new_item
+                    created += 1
 
-            if created > 0:
+            if created > 0 or merged > 0:
                 await db.commit()
                 _order_upload_logger.info(
-                    "Created %d items for order %s from %s",
-                    created, order_id, filename,
+                    "Persisted items for order %s from %s: %d created, %d merged",
+                    order_id, filename, created, merged,
                 )
 
             # Chain: auto-trigger fusion if both PO and PI items now exist
@@ -561,53 +608,156 @@ class _LLMProviderWrapper:
 
 
 def _text_to_rows(content: str) -> list[dict]:
-    """Convert tab/line-separated text content into list of dicts (header row as keys)."""
-    lines = [l.strip() for l in content.split("\n") if l.strip()]
+    """Convert tab/line-separated text content into list of dicts (header row as keys).
+
+    Handles real-world xlsx extractions where the first lines may be sheet
+    separators (``--- Sheet: … ---``) or metadata rows before the actual table.
+    Also merges two-row headers (parent row + sub-header row) that are common
+    in proforma invoices with merged cells.
+    """
+    lines = [l for l in content.split("\n") if l.strip()]
+    # Drop sheet-separator lines produced by _extract_xlsx
+    lines = [l for l in lines if not l.strip().startswith("--- Sheet:")]
     if len(lines) < 2:
         return []
 
-    # Detect separator: tab is most common from XLSX extraction
-    sep = "\t" if "\t" in lines[0] else ","
-    headers = [h.strip() for h in lines[0].split(sep)]
+    # Detect separator
+    sep = "\t" if any("\t" in l for l in lines[:5]) else ","
+
+    # ── Find the header row ─────────────────────────────────────────────
+    # For simple content (no table keywords found), use first line.
+    # For real-world xlsx with metadata, score lines by keyword hits to find
+    # the actual table header.
+    _TABLE_KEYWORDS = {
+        "item", "qty", "carton", "upc", "total", "description",
+        "code", "price", "cbm", "inner", "outer", "harmoniz",
+    }
+
+    best_idx = 0
+    best_kw_score = 0
+    for i, line in enumerate(lines):
+        fields = [f.strip() for f in line.split(sep)]
+        kw_hits = sum(
+            1 for f in fields
+            if any(kw in f.lower() for kw in _TABLE_KEYWORDS)
+        )
+        non_empty = sum(1 for f in fields if f)
+        # Only consider lines that have at least one keyword match.
+        # Among those, pick the one with the most keyword hits; break ties
+        # by number of non-empty fields.
+        score = kw_hits * 1000 + non_empty
+        if kw_hits > 0 and score > best_kw_score:
+            best_kw_score = score
+            best_idx = i
+
+    headers = [h.strip() for h in lines[best_idx].split(sep)]
     if not headers:
         return []
 
-    rows = []
-    for line in lines[1:]:
+    # ── Merge sub-header row if present ─────────────────────────────────
+    # A sub-header row fills in columns that are empty in the parent.
+    data_start = best_idx + 1
+    if data_start < len(lines):
+        sub_fields = [f.strip() for f in lines[data_start].split(sep)]
+        # Count how many empty parent slots the candidate sub-header fills
+        fills = sum(
+            1 for j in range(min(len(headers), len(sub_fields)))
+            if not headers[j] and sub_fields[j]
+        )
+        if fills >= 2:  # looks like a real sub-header
+            last_parent = ""
+            merged: list[str] = []
+            for j in range(max(len(headers), len(sub_fields))):
+                parent = headers[j] if j < len(headers) else ""
+                sub = sub_fields[j] if j < len(sub_fields) else ""
+                if parent:
+                    last_parent = parent
+                if parent and sub:
+                    merged.append(f"{parent} {sub}")
+                elif parent:
+                    merged.append(parent)
+                elif sub and last_parent:
+                    merged.append(f"{last_parent} {sub}")
+                elif sub:
+                    merged.append(sub)
+                else:
+                    merged.append("")
+            headers = merged
+            data_start += 1  # data rows start after sub-header
+
+    # ── Build row dicts ─────────────────────────────────────────────────
+    rows: list[dict] = []
+    for line in lines[data_start:]:
         cells = line.split(sep)
-        row = {}
-        for i, header in enumerate(headers):
+        row: dict[str, str] = {}
+        for j, header in enumerate(headers):
             if header:
-                row[header] = cells[i].strip() if i < len(cells) else ""
+                row[header] = cells[j].strip() if j < len(cells) else ""
         if any(v for v in row.values()):
             rows.append(row)
     return rows
 
 
 def _auto_detect_pi_mapping(rows: list[dict]) -> dict:
-    """Auto-detect PI template mapping from column headers."""
+    """Auto-detect PI template mapping from column headers.
+
+    Uses two-pass matching: first exact lowercase match, then keyword-based
+    scoring to handle merged multi-row headers like "(Carton Size in Inch) Lt".
+    """
     if not rows:
         return {}
-    sample_keys = {k.lower(): k for k in rows[0].keys()}
-    mapping = {}
+    sample_keys = {k.lower().strip(): k for k in rows[0].keys()}
+    mapping: dict[str, str] = {}
 
-    # Common column name patterns
-    patterns = {
-        "item_no": ["item_no", "item no", "item number", "sku", "style", "style no", "article"],
-        "box_L": ["box_l", "length", "carton length", "ctn length", "l(cm)", "length(cm)"],
-        "box_W": ["box_w", "width", "carton width", "ctn width", "w(cm)", "width(cm)"],
-        "box_H": ["box_h", "height", "carton height", "ctn height", "h(cm)", "height(cm)"],
-        "total_cartons": ["total_cartons", "total cartons", "ctns", "cartons", "qty", "quantity", "total qty"],
-        "inner_pack": ["inner_pack", "inner pack", "pcs/ctn", "pcs per ctn", "pack"],
-        "hs_code": ["hs_code", "hs code", "hts", "tariff"],
+    # ── Pass 1: exact lowercase match ───────────────────────────────────
+    exact_patterns: dict[str, list[str]] = {
+        "item_no": ["buyer's item code", "item_no", "item no", "item number", "sku", "style", "style no", "article"],
+        "box_L": ["box_l", "carton length", "ctn length", "l(cm)", "length(cm)", "length"],
+        "box_W": ["box_w", "carton width", "ctn width", "w(cm)", "width(cm)", "width"],
+        "box_H": ["box_h", "carton height", "ctn height", "h(cm)", "height(cm)", "height"],
+        "total_cartons": ["total_cartons", "total cartons", "ctns", "cartons"],
+        "inner_pack": ["inner_pack", "inner pack", "inner", "pcs/ctn", "pcs per ctn", "pack"],
+        "hs_code": ["hs_code", "hs code", "hts", "tariff", "harmonization no.", "harmonization no"],
         "cbm": ["cbm", "cubic meters", "m3"],
     }
 
-    for target, candidates in patterns.items():
+    for target, candidates in exact_patterns.items():
         for candidate in candidates:
             if candidate in sample_keys:
                 mapping[target] = sample_keys[candidate]
                 break
+
+    # ── Pass 2: keyword scoring for remaining unmapped targets ──────────
+    # Handles merged header names like "(Carton Size in Inch) Lt"
+    keyword_rules: dict[str, tuple[list[str], list[str]]] = {
+        # target: (required_keywords, exclude_keywords)
+        "item_no": (["buyer", "item"], ["nac"]),
+        "box_L": (["carton", "lt"], []),
+        "box_W": (["carton", "wt"], []),
+        "box_H": (["carton", "ht"], []),
+        "total_cartons": (["total", "carton"], []),
+        "hs_code": (["harmoniz"], []),
+        "cbm": (["cbm", "per"], []),
+    }
+
+    used_keys = set(mapping.values())
+    for target, (required, excluded) in keyword_rules.items():
+        if target in mapping:
+            continue
+        best_key: str | None = None
+        best_hits = 0
+        for kl, orig in sample_keys.items():
+            if orig in used_keys:
+                continue
+            if excluded and any(ex in kl for ex in excluded):
+                continue
+            hits = sum(1 for kw in required if kw in kl)
+            if hits > best_hits and hits >= len(required):
+                best_hits = hits
+                best_key = orig
+        if best_key:
+            mapping[target] = best_key
+            used_keys.add(best_key)
 
     return mapping
 

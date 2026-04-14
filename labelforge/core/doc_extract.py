@@ -64,7 +64,7 @@ def _extract_xlsx(data: bytes, max_chars: int) -> str:
     for sheet in wb.worksheets[:3]:  # First 3 sheets max
         text_parts.append(f"--- Sheet: {sheet.title} ---")
         for row in sheet.iter_rows(max_row=50, values_only=True):  # First 50 rows
-            cells = [str(c) if c is not None else "" for c in row]
+            cells = [str(c).replace("\n", " ").replace("\r", " ").strip() if c is not None else "" for c in row]
             line = "\t".join(cells)
             text_parts.append(line)
             total += len(line)
