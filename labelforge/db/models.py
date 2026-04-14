@@ -235,6 +235,7 @@ class DocumentClassification(Base):
     tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
     doc_class: Mapped[str] = mapped_column(String(50), nullable=False, default=DocumentClassEnum.UNKNOWN.value)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    classification_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     classified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
 

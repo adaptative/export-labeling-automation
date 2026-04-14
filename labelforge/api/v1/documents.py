@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -19,9 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from labelforge.api.v1.auth import get_current_user
+from labelforge.config import settings
 from labelforge.contracts import DocumentClass
 from labelforge.core.auth import TokenPayload
-from labelforge.core.blobstore import BlobMeta, MemoryBlobStore
+from labelforge.core.blobstore import BlobMeta, BlobStore, LocalFilesystemBlobStore, MemoryBlobStore
 from labelforge.db.models import Document as DocumentModel, DocumentClassification, Order
 from labelforge.db.session import get_db
 
@@ -30,12 +31,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-# ── Shared store (in production, injected via DI) ─────────────────────────
+# ── Shared store — uses local filesystem so files survive restarts ────────
 
-_blob_store = MemoryBlobStore()
+import os as _os
+
+_BLOB_ROOT = _os.path.join(
+    _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))),
+    ".blob_storage",
+)
+_blob_store: BlobStore = LocalFilesystemBlobStore(_BLOB_ROOT)
 
 
-def get_blob_store() -> MemoryBlobStore:
+def get_blob_store() -> BlobStore:
     return _blob_store
 
 
@@ -150,15 +157,19 @@ class DocumentDetailResponse(DocumentResponse):
 def _guess_doc_class(filename: str) -> DocumentClass:
     """Guess document class from filename."""
     lower = filename.lower()
-    if "po" in lower or "purchase" in lower:
-        return DocumentClass.PURCHASE_ORDER
-    elif "pi" in lower or "proforma" in lower or "invoice" in lower:
-        return DocumentClass.PROFORMA_INVOICE
-    elif "warning" in lower or "label" in lower:
-        return DocumentClass.WARNING_LABELS
-    elif "protocol" in lower:
+    # Protocol / labeling guide — check before "label" to avoid false WARNING_LABELS match
+    if "protocol" in lower or "marking and labeling" in lower or "carton marking" in lower:
         return DocumentClass.PROTOCOL
-    elif "checklist" in lower:
+    if "po" in lower or "purchase" in lower or "order" in lower:
+        return DocumentClass.PURCHASE_ORDER
+    if "pi" in lower or "proforma" in lower or "invoice" in lower:
+        return DocumentClass.PROFORMA_INVOICE
+    # Spreadsheets with importer codes are typically PIs (e.g. NACSBH290126.xlsx)
+    if lower.endswith((".xlsx", ".xls")) and not ("checklist" in lower or "check" in lower):
+        return DocumentClass.PROFORMA_INVOICE
+    if "warning" in lower:
+        return DocumentClass.WARNING_LABELS
+    if "checklist" in lower or "check" in lower:
         return DocumentClass.CHECKLIST
     return DocumentClass.UNKNOWN
 
@@ -166,14 +177,20 @@ def _guess_doc_class(filename: str) -> DocumentClass:
 def _classify_by_filename(filename: str) -> tuple[str, float]:
     """Quick filename-based classification heuristic."""
     lower = filename.lower()
-    if "po" in lower or "purchase" in lower:
+    # Protocol / labeling guide — check before "label" to avoid false WARNING_LABELS match
+    if "protocol" in lower or "marking and labeling" in lower or "carton marking" in lower:
+        return DocumentClass.PROTOCOL.value, 0.60
+    if "po" in lower or "purchase" in lower or "order" in lower:
         return DocumentClass.PURCHASE_ORDER.value, 0.60
     if "pi" in lower or "proforma" in lower or "invoice" in lower:
         return DocumentClass.PROFORMA_INVOICE.value, 0.60
-    if "protocol" in lower:
-        return DocumentClass.PROTOCOL.value, 0.60
-    if "warning" in lower or "label" in lower:
+    # Spreadsheets with importer codes are typically PIs (e.g. NACSBH290126.xlsx)
+    if lower.endswith((".xlsx", ".xls")) and not ("checklist" in lower or "check" in lower):
+        return DocumentClass.PROFORMA_INVOICE.value, 0.50
+    if "warning" in lower:
         return DocumentClass.WARNING_LABELS.value, 0.55
+    if "label" in lower:
+        return DocumentClass.WARNING_LABELS.value, 0.45
     if "checklist" in lower or "check" in lower:
         return DocumentClass.CHECKLIST.value, 0.55
     return DocumentClass.UNKNOWN.value, 0.0
@@ -187,7 +204,7 @@ def _doc_to_response(doc: DocumentModel, classification: Optional[DocumentClassi
     if classification is not None:
         doc_class = DocumentClass(classification.doc_class)
         confidence = classification.confidence or 0.0
-        classification_status = "classified"
+        classification_status = getattr(classification, "classification_status", None) or "classified"
 
     return DocumentResponse(
         id=doc.id,
@@ -279,10 +296,76 @@ async def get_document(
     )
 
 
+async def _run_ai_classification(
+    doc_id: str,
+    tenant_id: str,
+    filename: str,
+    storage_key: str,
+) -> None:
+    """Background task: run IntakeClassifierAgent and update DB classification."""
+    from labelforge.agents.intake_classifier import IntakeClassifierAgent
+    from labelforge.config import settings as app_settings
+    from labelforge.db.session import async_session_factory
+
+    from labelforge.core.doc_extract import extract_text
+    store = get_blob_store()
+    doc_content = ""
+    try:
+        data = await store.download(storage_key)
+        doc_content = extract_text(data, filename, max_chars=3000)
+    except Exception:
+        logger.warning("Could not read content for AI classification: %s", doc_id)
+
+    try:
+        from labelforge.core.llm import OpenAIProvider
+        provider = OpenAIProvider(api_key=app_settings.openai_api_key)
+        agent = IntakeClassifierAgent(provider)
+        result = await agent.execute({
+            "document_content": doc_content,
+            "filename": filename,
+        })
+
+        async with async_session_factory() as db:
+            cls_result = await db.execute(
+                select(DocumentClassification).where(
+                    DocumentClassification.document_id == doc_id,
+                    DocumentClassification.tenant_id == tenant_id,
+                )
+            )
+            classification = cls_result.scalar_one_or_none()
+            if classification:
+                classification.doc_class = result.data.get("doc_class", "UNKNOWN")
+                classification.confidence = result.confidence
+                classification.classification_status = "classified"
+                await db.commit()
+
+        logger.info(
+            "AI classification complete: doc=%s class=%s confidence=%.2f",
+            doc_id, result.data.get("doc_class"), result.confidence,
+        )
+    except Exception as exc:
+        logger.error("AI classification failed for %s: %s", doc_id, exc)
+        try:
+            async with async_session_factory() as db:
+                cls_result = await db.execute(
+                    select(DocumentClassification).where(
+                        DocumentClassification.document_id == doc_id,
+                        DocumentClassification.tenant_id == tenant_id,
+                    )
+                )
+                classification = cls_result.scalar_one_or_none()
+                if classification:
+                    classification.classification_status = "classified"
+                    await db.commit()
+        except Exception:
+            pass
+
+
 @router.post("/upload", response_model=DocumentUploadResponse, status_code=201)
 async def upload_document(
     order_id: str = Query(..., description="Order to attach document to"),
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     _user: TokenPayload = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentUploadResponse:
@@ -344,6 +427,7 @@ async def upload_document(
         tenant_id=_user.tenant_id,
         doc_class=guessed_class.value,
         confidence=quick_confidence,
+        classification_status="classifying",
     )
     db.add(classification)
     await db.commit()
@@ -368,6 +452,15 @@ async def upload_document(
         doc_id, order_id, filename, size_bytes, blob_meta.sha256[:16],
     )
 
+    # Queue AI classification as a background task
+    background_tasks.add_task(
+        _run_ai_classification,
+        doc_id=doc_id,
+        tenant_id=_user.tenant_id,
+        filename=filename,
+        storage_key=storage_key,
+    )
+
     return DocumentUploadResponse(
         id=doc_id,
         filename=filename,
@@ -375,33 +468,64 @@ async def upload_document(
         confidence=quick_confidence,
         size_bytes=size_bytes,
         storage_key=storage_key,
-        classification_status="pending",
-        message=f"Document '{filename}' uploaded for order {order_id}. Classification pending.",
+        classification_status="classifying",
+        message=f"Document '{filename}' uploaded for order {order_id}. AI classification in progress.",
     )
 
 
 @router.get("/{document_id}/preview")
 async def preview_document(
     document_id: str,
-    _user: TokenPayload = Depends(get_current_user),
+    request: Request,
+    token: Optional[str] = Query(None, description="JWT token for browser tab preview"),
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Download/preview document content from BlobStore."""
-    doc = next((d for d in _documents if d.id == document_id), None)
+    """Download/preview document content from BlobStore.
+
+    Supports auth via Authorization header OR ?token= query param
+    (needed when opening preview in a new browser tab).
+    """
+    # --- authenticate: header first, then query param fallback ---
+    from labelforge.core.auth import decode_token, AuthError
+    auth_header = request.headers.get("Authorization")
+    jwt_token = None
+    if auth_header and auth_header.startswith("Bearer "):
+        jwt_token = auth_header[len("Bearer "):]
+    elif token:
+        jwt_token = token
+    if not jwt_token:
+        raise HTTPException(status_code=401, detail="Missing authentication")
+    try:
+        _user = decode_token(jwt_token, settings.jwt_secret_key)
+    except AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+    # --- look up document from DB ---
+    result = await db.execute(
+        select(DocumentModel).where(
+            DocumentModel.id == document_id,
+            DocumentModel.tenant_id == _user.tenant_id,
+        )
+    )
+    doc = result.scalar_one_or_none()
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
     store = get_blob_store()
     try:
-        data = await store.download(doc.storage_key)
+        data = await store.download(doc.s3_key)
     except KeyError:
         raise HTTPException(status_code=404, detail="Document file not found in storage")
 
-    content_type = "application/pdf"
-    if doc.filename.lower().endswith((".xlsx", ".xls")):
+    fname = doc.filename.lower()
+    content_type = "application/octet-stream"
+    if fname.endswith(".pdf"):
+        content_type = "application/pdf"
+    elif fname.endswith((".xlsx", ".xls")):
         content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    elif doc.filename.lower().endswith((".png",)):
+    elif fname.endswith(".png"):
         content_type = "image/png"
-    elif doc.filename.lower().endswith((".jpg", ".jpeg")):
+    elif fname.endswith((".jpg", ".jpeg")):
         content_type = "image/jpeg"
 
     return Response(
@@ -426,11 +550,12 @@ async def classify_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     # Try to read content from blob store for classification
+    from labelforge.core.doc_extract import extract_text
     store = get_blob_store()
     doc_content = ""
     try:
         data = await store.download(doc.storage_key)
-        doc_content = data.decode("utf-8", errors="replace")[:2000]
+        doc_content = extract_text(data, doc.filename, max_chars=3000)
     except (KeyError, Exception):
         logger.warning("Could not read document content for classification: %s", document_id)
 
