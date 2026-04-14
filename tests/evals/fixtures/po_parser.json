@@ -1,21 +1,21 @@
 [
   {
     "id": "po-001",
-    "description": "Standard PO with valid UPCs",
+    "description": "Standard PO with valid UPCs — LLM enriches material/category",
     "input": {
       "items": [
-        {"item_no": "A1001", "upc": "012345678905", "description": "Wooden Table", "case_qty": 10, "total_qty": 500},
-        {"item_no": "A1002", "upc": "012345678912", "description": "Chair Set", "case_qty": 5, "total_qty": 200}
+        {"item_no": "A1001", "upc": "012345678905", "description": "Wooden Table", "case_qty": "10", "total_qty": 500},
+        {"item_no": "A1002", "upc": "012345678912", "description": "Chair Set", "case_qty": "5", "total_qty": 200}
       ]
     },
     "expected": {"item_count": 2, "min_confidence": 0.85, "needs_hitl": false}
   },
   {
     "id": "po-002",
-    "description": "PO with invalid UPC triggers HiTL",
+    "description": "PO with invalid UPC triggers HiTL — LLM suggests correction",
     "input": {
       "items": [
-        {"item_no": "B001", "upc": "111111111111", "description": "Lamp", "case_qty": 5, "total_qty": 100}
+        {"item_no": "B001", "upc": "111111111111", "description": "Lamp", "case_qty": "5", "total_qty": 100}
       ]
     },
     "expected": {"needs_hitl": true}
@@ -25,12 +25,43 @@
     "description": "Large PO with many valid line items",
     "input": {
       "items": [
-        {"item_no": "C001", "upc": "012345678905", "description": "Widget A", "total_qty": 1000},
-        {"item_no": "C002", "upc": "012345678912", "description": "Widget B", "total_qty": 2000},
-        {"item_no": "C003", "upc": "012345678929", "description": "Widget C", "total_qty": 500},
-        {"item_no": "C004", "upc": "012345678936", "description": "Widget D", "total_qty": 300}
+        {"item_no": "C001", "upc": "012345678905", "description": "Widget A", "case_qty": "10", "total_qty": 1000},
+        {"item_no": "C002", "upc": "012345678912", "description": "Widget B", "case_qty": "5", "total_qty": 2000},
+        {"item_no": "C003", "upc": "012345678929", "description": "Widget C", "case_qty": "10", "total_qty": 500},
+        {"item_no": "C004", "upc": "012345678936", "description": "Widget D", "case_qty": "10", "total_qty": 300}
       ]
     },
     "expected": {"item_count": 4, "min_confidence": 0.80}
+  },
+  {
+    "id": "po-004",
+    "description": "PO with dimensions and weight — LLM validates consistency",
+    "input": {
+      "items": [
+        {"item_no": "D001", "upc": "012345678905", "description": "Paper Mache Vase",
+         "case_qty": "10", "total_qty": 300,
+         "product_dims": {"length": 12, "width": 12, "height": 15, "unit": "in"},
+         "net_weight": 1.2}
+      ]
+    },
+    "expected": {"item_count": 1, "min_confidence": 0.90, "needs_hitl": false}
+  },
+  {
+    "id": "po-005",
+    "description": "PO with missing required fields — triggers HiTL",
+    "input": {
+      "items": [
+        {"item_no": "E001", "upc": "012345678905"}
+      ]
+    },
+    "expected": {"needs_hitl": true, "min_confidence": 0.0}
+  },
+  {
+    "id": "po-006",
+    "description": "Raw text PO — LLM extraction mode",
+    "input": {
+      "document_content": "Purchase Order #25364\nSagebrook Home\n\nItem: 18236-08\nUPC: 677478725232\nDescription: 15X12 Paper Mache Vase w/ Handles, Taupe\nCase Qty: 10\nTotal Qty: 300"
+    },
+    "expected": {"needs_hitl": false}
   }
 ]
