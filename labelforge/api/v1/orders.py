@@ -93,6 +93,7 @@ def _compute_state(items: list) -> OrderState:
             state=i.state,
             state_changed_at=i.state_changed_at or datetime.now(tz=timezone.utc),
             rules_snapshot_id=i.rules_snapshot_id,
+            data=i.data,
         )
         for i in items
     ]
@@ -224,6 +225,7 @@ async def get_order(
             state=i.state,
             state_changed_at=i.state_changed_at or datetime.now(tz=timezone.utc),
             rules_snapshot_id=i.rules_snapshot_id,
+            data=i.data,
         )
         for i in items
     ]
@@ -276,6 +278,7 @@ async def list_order_items(
             state=i.state,
             state_changed_at=i.state_changed_at or datetime.now(tz=timezone.utc),
             rules_snapshot_id=i.rules_snapshot_id,
+            data=i.data,
         )
         for i in items
     ]
@@ -327,8 +330,9 @@ async def _run_ai_classification(
     tenant_id: str,
     filename: str,
     storage_key: str,
+    order_id: str = "",
 ) -> None:
-    """Background task: run IntakeClassifierAgent and update DB classification."""
+    """Background task: classify document, then extract items if PO/PI."""
     from labelforge.agents.intake_classifier import IntakeClassifierAgent
     from labelforge.config import settings as app_settings
     from labelforge.db.models import DocumentClassification
@@ -339,13 +343,15 @@ async def _run_ai_classification(
     from labelforge.core.doc_extract import extract_text
     store = get_blob_store()
     doc_content = ""
+    raw_data = b""
     try:
-        data = await store.download(storage_key)
-        doc_content = extract_text(data, filename, max_chars=3000)
+        raw_data = await store.download(storage_key)
+        doc_content = extract_text(raw_data, filename, max_chars=6000)
     except Exception:
         _order_upload_logger.warning("Could not read content for AI classification: %s", doc_id)
 
-    # Run agent
+    # Run classification agent
+    doc_class = "UNKNOWN"
     try:
         from labelforge.core.llm import OpenAIProvider
         provider = OpenAIProvider(api_key=app_settings.openai_api_key)
@@ -354,6 +360,8 @@ async def _run_ai_classification(
             "document_content": doc_content,
             "filename": filename,
         })
+
+        doc_class = result.data.get("doc_class", "UNKNOWN")
 
         # Update classification in DB
         async with async_session_factory() as db:
@@ -365,18 +373,17 @@ async def _run_ai_classification(
             )
             classification = cls_result.scalar_one_or_none()
             if classification:
-                classification.doc_class = result.data.get("doc_class", "UNKNOWN")
+                classification.doc_class = doc_class
                 classification.confidence = result.confidence
                 classification.classification_status = "classified"
                 await db.commit()
 
         _order_upload_logger.info(
             "AI classification complete: doc=%s class=%s confidence=%.2f",
-            doc_id, result.data.get("doc_class"), result.confidence,
+            doc_id, doc_class, result.confidence,
         )
     except Exception as exc:
         _order_upload_logger.error("AI classification failed for %s: %s", doc_id, exc)
-        # Mark as failed in DB
         try:
             async with async_session_factory() as db:
                 cls_result = await db.execute(
@@ -391,6 +398,189 @@ async def _run_ai_classification(
                     await db.commit()
         except Exception:
             pass
+
+    # ── Chain: extract items from PO/PI docs ─────────────────────────────
+    if order_id and doc_class in ("PURCHASE_ORDER", "PROFORMA_INVOICE") and doc_content:
+        await _run_item_extraction(
+            order_id=order_id,
+            tenant_id=tenant_id,
+            doc_class=doc_class,
+            doc_content=doc_content,
+            filename=filename,
+        )
+
+
+async def _run_item_extraction(
+    order_id: str,
+    tenant_id: str,
+    doc_class: str,
+    doc_content: str,
+    filename: str,
+) -> None:
+    """Extract line items from PO/PI and persist as OrderItemModel records."""
+    from labelforge.config import settings as app_settings
+    from labelforge.db.models import OrderItemModel, ItemStateEnum
+    from labelforge.db.session import async_session_factory
+
+    items: list[dict] = []
+
+    try:
+        if doc_class == "PURCHASE_ORDER":
+            from labelforge.agents.po_parser import POParserAgent
+            from labelforge.core.llm import OpenAIProvider
+
+            provider = OpenAIProvider(api_key=app_settings.openai_api_key)
+            # Wrap provider to match POParserAgent's calling convention
+            wrapper = _LLMProviderWrapper(provider, app_settings.llm_default_model)
+            agent = POParserAgent(llm_provider=wrapper)
+            result = await agent.execute({"document_content": doc_content})
+
+            if result.success or result.data.get("items"):
+                items = result.data.get("items", [])
+                _order_upload_logger.info(
+                    "PO parsed: %d items from %s (confidence=%.2f)",
+                    len(items), filename, result.confidence,
+                )
+
+        elif doc_class == "PROFORMA_INVOICE":
+            from labelforge.agents.pi_parser import PIParserAgent
+
+            # PI parser is deterministic — extract rows from the text content
+            rows = _text_to_rows(doc_content)
+            if rows:
+                agent = PIParserAgent()
+                # Auto-detect column mapping from the header row
+                mapping = _auto_detect_pi_mapping(rows)
+                result = await agent.execute({
+                    "rows": rows,
+                    "template_mapping": mapping,
+                })
+                if result.data.get("items"):
+                    items = result.data.get("items", [])
+                    _order_upload_logger.info(
+                        "PI parsed: %d items from %s (confidence=%.2f)",
+                        len(items), filename, result.confidence,
+                    )
+
+    except Exception as exc:
+        _order_upload_logger.error("Item extraction failed for %s/%s: %s", order_id, filename, exc)
+        return
+
+    if not items:
+        _order_upload_logger.info("No items extracted from %s for order %s", filename, order_id)
+        return
+
+    # Persist items to DB
+    try:
+        async with async_session_factory() as db:
+            # Get existing item_nos to avoid duplicates
+            existing = await db.execute(
+                select(OrderItemModel.item_no).where(
+                    OrderItemModel.order_id == order_id,
+                    OrderItemModel.tenant_id == tenant_id,
+                )
+            )
+            existing_item_nos = {r[0] for r in existing.all()}
+
+            created = 0
+            for item_data in items:
+                item_no = str(item_data.get("item_no", "")).strip()
+                if not item_no or item_no == "UNKNOWN":
+                    continue
+                if item_no in existing_item_nos:
+                    _order_upload_logger.debug("Item %s already exists in order %s, skipping", item_no, order_id)
+                    continue
+
+                new_item = OrderItemModel(
+                    id=f"itm-{uuid.uuid4().hex[:8]}",
+                    order_id=order_id,
+                    tenant_id=tenant_id,
+                    item_no=item_no,
+                    state=ItemStateEnum.PARSED.value,
+                    data=item_data,
+                )
+                db.add(new_item)
+                existing_item_nos.add(item_no)
+                created += 1
+
+            if created > 0:
+                await db.commit()
+                _order_upload_logger.info(
+                    "Created %d items for order %s from %s",
+                    created, order_id, filename,
+                )
+    except Exception as exc:
+        _order_upload_logger.error("Failed to persist items for %s: %s", order_id, exc)
+
+
+class _LLMProviderWrapper:
+    """Adapts OpenAIProvider (model, messages) to the simpler (prompt, model_id) interface
+    expected by POParserAgent._extract_from_text and _validate_and_enrich."""
+
+    def __init__(self, provider, default_model: str):
+        self._provider = provider
+        self._model = default_model
+
+    async def complete(self, prompt: str, model_id: str = "default"):
+        messages = [{"role": "user", "content": prompt}]
+        return await self._provider.complete(
+            model=self._model,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=4096,
+        )
+
+
+def _text_to_rows(content: str) -> list[dict]:
+    """Convert tab/line-separated text content into list of dicts (header row as keys)."""
+    lines = [l.strip() for l in content.split("\n") if l.strip()]
+    if len(lines) < 2:
+        return []
+
+    # Detect separator: tab is most common from XLSX extraction
+    sep = "\t" if "\t" in lines[0] else ","
+    headers = [h.strip() for h in lines[0].split(sep)]
+    if not headers:
+        return []
+
+    rows = []
+    for line in lines[1:]:
+        cells = line.split(sep)
+        row = {}
+        for i, header in enumerate(headers):
+            if header:
+                row[header] = cells[i].strip() if i < len(cells) else ""
+        if any(v for v in row.values()):
+            rows.append(row)
+    return rows
+
+
+def _auto_detect_pi_mapping(rows: list[dict]) -> dict:
+    """Auto-detect PI template mapping from column headers."""
+    if not rows:
+        return {}
+    sample_keys = {k.lower(): k for k in rows[0].keys()}
+    mapping = {}
+
+    # Common column name patterns
+    patterns = {
+        "item_no": ["item_no", "item no", "item number", "sku", "style", "style no", "article"],
+        "box_L": ["box_l", "length", "carton length", "ctn length", "l(cm)", "length(cm)"],
+        "box_W": ["box_w", "width", "carton width", "ctn width", "w(cm)", "width(cm)"],
+        "box_H": ["box_h", "height", "carton height", "ctn height", "h(cm)", "height(cm)"],
+        "total_cartons": ["total_cartons", "total cartons", "ctns", "cartons", "qty", "quantity", "total qty"],
+        "inner_pack": ["inner_pack", "inner pack", "pcs/ctn", "pcs per ctn", "pack"],
+        "hs_code": ["hs_code", "hs code", "hts", "tariff"],
+        "cbm": ["cbm", "cubic meters", "m3"],
+    }
+
+    for target, candidates in patterns.items():
+        for candidate in candidates:
+            if candidate in sample_keys:
+                mapping[target] = sample_keys[candidate]
+                break
+
+    return mapping
 
 
 @router.post("/{order_id}/documents", status_code=201)
@@ -487,6 +677,7 @@ async def upload_order_document(
         tenant_id=_user.tenant_id,
         filename=filename,
         storage_key=storage_key,
+        order_id=order_id,
     )
 
     return {

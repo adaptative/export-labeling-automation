@@ -471,6 +471,7 @@ class OrderItem(BaseModel):
     state: ItemState = ItemState.CREATED
     state_changed_at: datetime = Field(default_factory=datetime.utcnow)
     rules_snapshot_id: Optional[str] = None
+    data: Optional[dict] = None
 
 
 # ── Order-state derivation ─────────────────────────────────────────────────────

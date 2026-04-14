@@ -73,7 +73,7 @@ class TestUploadDocument:
         assert "id" in data
         assert data["filename"] == "test-PO.pdf"
         assert data["doc_class"] == "PURCHASE_ORDER"
-        assert data["classification_status"] == "pending"
+        assert data["classification_status"] in ("pending", "classifying")
         assert data["size_bytes"] > 0
 
     def test_upload_stores_in_blobstore(self, client, admin_headers):
@@ -178,7 +178,7 @@ class TestOrderDocumentUpload:
         data = resp.json()
         assert data["order_id"] == "ORD-2026-0042"
         assert data["filename"] == "PO-new.pdf"
-        assert data["classification_status"] == "pending"
+        assert data["classification_status"] in ("pending", "classifying")
 
     def test_upload_to_nonexistent_order(self, client, admin_headers):
         resp = client.post(
