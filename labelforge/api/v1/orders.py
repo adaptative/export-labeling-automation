@@ -5,7 +5,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -317,11 +319,85 @@ async def create_order(
 
 # ── Order-scoped document upload ────────────────────────────────────────────
 
+_order_upload_logger = logging.getLogger(__name__)
+
+
+async def _run_ai_classification(
+    doc_id: str,
+    tenant_id: str,
+    filename: str,
+    storage_key: str,
+) -> None:
+    """Background task: run IntakeClassifierAgent and update DB classification."""
+    from labelforge.agents.intake_classifier import IntakeClassifierAgent
+    from labelforge.config import settings as app_settings
+    from labelforge.db.models import DocumentClassification
+    from labelforge.db.session import async_session_factory
+
+    # Read document content from blob store with proper text extraction
+    from labelforge.api.v1.documents import get_blob_store
+    from labelforge.core.doc_extract import extract_text
+    store = get_blob_store()
+    doc_content = ""
+    try:
+        data = await store.download(storage_key)
+        doc_content = extract_text(data, filename, max_chars=3000)
+    except Exception:
+        _order_upload_logger.warning("Could not read content for AI classification: %s", doc_id)
+
+    # Run agent
+    try:
+        from labelforge.core.llm import OpenAIProvider
+        provider = OpenAIProvider(api_key=app_settings.openai_api_key)
+        agent = IntakeClassifierAgent(provider)
+        result = await agent.execute({
+            "document_content": doc_content,
+            "filename": filename,
+        })
+
+        # Update classification in DB
+        async with async_session_factory() as db:
+            cls_result = await db.execute(
+                select(DocumentClassification).where(
+                    DocumentClassification.document_id == doc_id,
+                    DocumentClassification.tenant_id == tenant_id,
+                )
+            )
+            classification = cls_result.scalar_one_or_none()
+            if classification:
+                classification.doc_class = result.data.get("doc_class", "UNKNOWN")
+                classification.confidence = result.confidence
+                classification.classification_status = "classified"
+                await db.commit()
+
+        _order_upload_logger.info(
+            "AI classification complete: doc=%s class=%s confidence=%.2f",
+            doc_id, result.data.get("doc_class"), result.confidence,
+        )
+    except Exception as exc:
+        _order_upload_logger.error("AI classification failed for %s: %s", doc_id, exc)
+        # Mark as failed in DB
+        try:
+            async with async_session_factory() as db:
+                cls_result = await db.execute(
+                    select(DocumentClassification).where(
+                        DocumentClassification.document_id == doc_id,
+                        DocumentClassification.tenant_id == tenant_id,
+                    )
+                )
+                classification = cls_result.scalar_one_or_none()
+                if classification:
+                    classification.classification_status = "classified"
+                    await db.commit()
+        except Exception:
+            pass
+
 
 @router.post("/{order_id}/documents", status_code=201)
 async def upload_order_document(
     order_id: str,
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     _user: TokenPayload = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -385,6 +461,7 @@ async def upload_order_document(
         tenant_id=_user.tenant_id,
         doc_class=guessed_class.value,
         confidence=quick_confidence,
+        classification_status="classifying",
     )
     db.add(classification)
     await db.commit()
@@ -403,6 +480,15 @@ async def upload_order_document(
     )
     _documents.append(doc)
 
+    # Queue AI classification as a background task
+    background_tasks.add_task(
+        _run_ai_classification,
+        doc_id=doc_id,
+        tenant_id=_user.tenant_id,
+        filename=filename,
+        storage_key=storage_key,
+    )
+
     return {
         "id": doc_id,
         "order_id": order_id,
@@ -410,8 +496,8 @@ async def upload_order_document(
         "doc_class": quick_class,
         "confidence": quick_confidence,
         "size_bytes": size_bytes,
-        "classification_status": "pending",
-        "message": f"Document '{filename}' uploaded to order {order_id}. Classification pending.",
+        "classification_status": "classifying",
+        "message": f"Document '{filename}' uploaded to order {order_id}. AI classification in progress.",
     }
 
 

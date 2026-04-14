@@ -38,3 +38,4 @@ credentials.json
 .env.local
 .env.*.local
 labelforge.db
+.blob_storage/
