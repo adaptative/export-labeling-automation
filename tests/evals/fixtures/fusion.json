@@ -4,7 +4,7 @@
     "description": "Clean merge of PO and PI items",
     "input": {
       "po_items": [
-        {"item_no": "A1001", "upc": "012345678905", "description": "Wooden Table", "case_qty": 10, "total_qty": 500}
+        {"item_no": "A1001", "upc": "012345678905", "description": "Wooden Table", "case_qty": "10", "total_qty": 500}
       ],
       "pi_items": [
         {"item_no": "A1001", "box_L": 24, "box_W": 18, "box_H": 12, "total_cartons": 50}
@@ -17,7 +17,7 @@
     "description": "Dimension mismatch triggers HiTL (product exceeds box)",
     "input": {
       "po_items": [
-        {"item_no": "B001", "upc": "012345678905", "description": "Lamp", "product_dims": {"length": 12, "width": 12, "height": 24}, "case_qty": 5, "total_qty": 100}
+        {"item_no": "B001", "upc": "012345678905", "description": "Lamp", "product_dims": {"length": 12, "width": 12, "height": 24}, "case_qty": "5", "total_qty": 100}
       ],
       "pi_items": [
         {"item_no": "B001", "box_L": 8, "box_W": 8, "box_H": 10, "total_cartons": 20}
@@ -30,13 +30,39 @@
     "description": "Missing PI item triggers critical issue",
     "input": {
       "po_items": [
-        {"item_no": "C001", "upc": "012345678905", "description": "Widget", "case_qty": 10, "total_qty": 1000},
-        {"item_no": "C002", "upc": "012345678912", "description": "Gadget", "case_qty": 5, "total_qty": 500}
+        {"item_no": "C001", "upc": "012345678905", "description": "Widget", "case_qty": "10", "total_qty": 1000},
+        {"item_no": "C002", "upc": "012345678912", "description": "Gadget", "case_qty": "5", "total_qty": 500}
       ],
       "pi_items": [
         {"item_no": "C001", "box_L": 10, "box_W": 10, "box_H": 10, "total_cartons": 100}
       ]
     },
     "expected": {"needs_hitl": true}
+  },
+  {
+    "id": "fus-004",
+    "description": "Items with weight data — no issues",
+    "input": {
+      "po_items": [
+        {"item_no": "D001", "upc": "012345678905", "description": "Mug", "case_qty": "24", "total_qty": 480, "net_weight": 0.5}
+      ],
+      "pi_items": [
+        {"item_no": "D001", "box_L": 12, "box_W": 10, "box_H": 8, "total_cartons": 20}
+      ]
+    },
+    "expected": {"fused_count": 1, "needs_hitl": false, "min_confidence": 0.85}
+  },
+  {
+    "id": "fus-005",
+    "description": "Invalid UPC generates warning but not critical",
+    "input": {
+      "po_items": [
+        {"item_no": "E001", "upc": "111111111111", "description": "Lamp", "case_qty": "5", "total_qty": 100}
+      ],
+      "pi_items": [
+        {"item_no": "E001", "box_L": 20, "box_W": 15, "box_H": 10, "total_cartons": 20}
+      ]
+    },
+    "expected": {"fused_count": 1, "needs_hitl": false, "min_confidence": 0.80}
   }
 ]
