@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from labelforge.app import app
 from labelforge.api.v1.errors import (
@@ -10,11 +9,6 @@ from labelforge.api.v1.errors import (
     ERR_NOT_FOUND, ERR_VALIDATION, ERR_UNAUTHORIZED,
     ERR_FORBIDDEN, ERR_CONFLICT, ERR_INTERNAL, ERR_SERVICE_UNAVAILABLE,
 )
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 class TestErrorResponse:

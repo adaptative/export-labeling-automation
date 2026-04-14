@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
-from labelforge.app import app
 
 
 @pytest.fixture(autouse=True)
@@ -15,11 +12,6 @@ def _reset_documents():
     yield
     docs_mod._documents.clear()
     docs_mod._documents.extend(original)
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 class TestListDocuments:
