@@ -4,17 +4,21 @@ from __future__ import annotations
 import pytest
 
 from labelforge.core.llm import (
+    REDIS_CACHE_TTL,
     TOKEN_PRICING,
     CompletionCache,
     CompletionResult,
     FallbackProvider,
     LLMProvider,
     OpenAIProvider,
+    RedisCompletionCache,
     StubProvider,
     cache_key,
     estimate_cost,
     get_default_cache,
+    set_default_cache,
 )
+from tests.stubs import StubRedis
 
 
 class TestTokenPricing:
@@ -154,6 +158,172 @@ class TestCompletionCache:
         c1 = get_default_cache()
         c2 = get_default_cache()
         assert c1 is c2
+
+
+class TestRedisCompletionCache:
+    """Tests for Redis-backed completion cache using StubRedis."""
+
+    def _make_result(self, content="cached response") -> CompletionResult:
+        return CompletionResult(
+            content=content, model="gpt-5.4", input_tokens=100,
+            output_tokens=50, cost_usd=0.01, latency_ms=120.0,
+            provider="openai", metadata={"finish_reason": "stop"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_aput_and_aget(self):
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis)
+        result = self._make_result()
+        await cache.aput("key1", result)
+        cached = await cache.aget("key1")
+        assert cached is not None
+        assert cached.content == "cached response"
+        assert cached.model == "gpt-5.4"
+        assert cached.input_tokens == 100
+        assert cached.output_tokens == 50
+        assert cached.cached is True  # deserialized as cached
+        assert cached.provider == "openai"
+
+    @pytest.mark.asyncio
+    async def test_aget_miss_returns_none(self):
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis)
+        assert await cache.aget("nonexistent") is None
+
+    @pytest.mark.asyncio
+    async def test_hit_counter(self):
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis)
+        await cache.aput("k", self._make_result())
+        await cache.aget("k")
+        await cache.aget("k")
+        assert cache.hits == 2
+
+    @pytest.mark.asyncio
+    async def test_miss_counter(self):
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis)
+        await cache.aget("x")
+        await cache.aget("y")
+        assert cache.misses == 2
+
+    @pytest.mark.asyncio
+    async def test_ttl_set_on_put(self):
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis, ttl=3600)
+        await cache.aput("k", self._make_result())
+        assert redis._ttls.get("llm:cache:k") == 3600
+
+    @pytest.mark.asyncio
+    async def test_default_ttl(self):
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis)
+        await cache.aput("k", self._make_result())
+        assert redis._ttls.get("llm:cache:k") == REDIS_CACHE_TTL
+
+    @pytest.mark.asyncio
+    async def test_custom_prefix(self):
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis, prefix="myapp:llm:")
+        await cache.aput("k", self._make_result())
+        assert "myapp:llm:k" in redis._data
+
+    @pytest.mark.asyncio
+    async def test_serialization_round_trip(self):
+        """All CompletionResult fields survive serialize/deserialize."""
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis)
+        original = CompletionResult(
+            content="hello world", model="gpt-4o", input_tokens=200,
+            output_tokens=100, cost_usd=0.02, latency_ms=250.5,
+            provider="openai", metadata={"finish_reason": "stop", "extra": 42},
+        )
+        await cache.aput("round_trip", original)
+        cached = await cache.aget("round_trip")
+        assert cached.content == original.content
+        assert cached.model == original.model
+        assert cached.input_tokens == original.input_tokens
+        assert cached.output_tokens == original.output_tokens
+        assert cached.cost_usd == original.cost_usd
+        assert cached.latency_ms == original.latency_ms
+        assert cached.provider == original.provider
+        assert cached.metadata == original.metadata
+
+    @pytest.mark.asyncio
+    async def test_sync_get_returns_none(self):
+        """Sync get() always misses for Redis cache — must use aget()."""
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis)
+        await cache.aput("k", self._make_result())
+        assert cache.get("k") is None  # sync not supported
+
+    @pytest.mark.asyncio
+    async def test_redis_error_graceful_get(self):
+        """Redis errors on get return None instead of crashing."""
+        class BrokenRedis:
+            async def get(self, key):
+                raise ConnectionError("Redis down")
+            async def set(self, key, value, ex=None):
+                pass
+
+        cache = RedisCompletionCache(BrokenRedis())
+        result = await cache.aget("k")
+        assert result is None
+        assert cache.misses == 1
+
+    @pytest.mark.asyncio
+    async def test_redis_error_graceful_put(self):
+        """Redis errors on put are logged but don't crash."""
+        class BrokenRedis:
+            async def set(self, key, value, ex=None):
+                raise ConnectionError("Redis down")
+
+        cache = RedisCompletionCache(BrokenRedis())
+        # Should not raise
+        await cache.aput("k", self._make_result())
+
+    @pytest.mark.asyncio
+    async def test_clear_resets_counters(self):
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis)
+        await cache.aput("k", self._make_result())
+        await cache.aget("k")
+        cache.clear()
+        assert cache.hits == 0
+        assert cache.misses == 0
+
+
+class TestSetDefaultCache:
+    def test_set_and_get(self):
+        original = get_default_cache()
+        redis = StubRedis()
+        new_cache = RedisCompletionCache(redis)
+        set_default_cache(new_cache)
+        assert get_default_cache() is new_cache
+        # Restore
+        set_default_cache(original)
+
+
+class TestCompleteWithCacheRedis:
+    """Test complete_with_cache works with RedisCompletionCache."""
+
+    @pytest.mark.asyncio
+    async def test_redis_cache_with_provider(self):
+        redis = StubRedis()
+        cache = RedisCompletionCache(redis)
+        provider = StubProvider()
+        msgs = [{"role": "user", "content": "redis test"}]
+
+        r1 = await provider.complete_with_cache("gpt-5.4", msgs, cache=cache)
+        assert r1.cached is False
+        assert cache.hits == 0
+        assert cache.misses == 1
+
+        r2 = await provider.complete_with_cache("gpt-5.4", msgs, cache=cache)
+        assert r2.cached is True
+        assert r2.cost_usd == 0.0
+        assert cache.hits == 1
 
 
 class TestOpenAIProvider:

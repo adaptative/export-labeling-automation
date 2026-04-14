@@ -13,12 +13,31 @@ from labelforge.api.v1.errors import register_error_handlers
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create tables and seed data on startup."""
+    """Create tables, seed data, and wire Redis cache on startup."""
     from labelforge.db.session import create_all_tables
     from labelforge.db.seed import seed_if_empty
     await create_all_tables()
     await seed_if_empty()
+
+    # Wire Redis-backed LLM completion cache
+    redis_client = None
+    if settings.redis_url and settings.app_env != "test":
+        try:
+            import redis.asyncio as aioredis
+            from labelforge.core.llm import RedisCompletionCache, set_default_cache
+            redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+            await redis_client.ping()
+            set_default_cache(RedisCompletionCache(redis_client))
+            import logging
+            logging.getLogger(__name__).info("Redis LLM cache connected: %s", settings.redis_url)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Redis LLM cache unavailable, using in-memory: %s", exc)
+
     yield
+
+    if redis_client:
+        await redis_client.aclose()
 
 
 app = FastAPI(

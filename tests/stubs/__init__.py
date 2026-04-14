@@ -102,8 +102,10 @@ class StubRedis:
     async def exists(self, key: str) -> bool:
         return key in self._data or key in self._sets
 
-    async def set(self, key: str, value, **kwargs):
+    async def set(self, key: str, value, ex=None, **kwargs):
         self._data[key] = value
+        if ex is not None:
+            self._ttls[key] = ex
 
     async def delete(self, key: str):
         self._data.pop(key, None)
