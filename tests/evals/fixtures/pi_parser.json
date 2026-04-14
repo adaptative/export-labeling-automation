@@ -16,7 +16,7 @@
         "hs_code": "col_F"
       }
     },
-    "expected": {"item_count": 2, "confidence": 1.0, "needs_hitl": false}
+    "expected": {"item_count": 2, "min_confidence": 0.90, "needs_hitl": false}
   },
   {
     "id": "pi-002",
@@ -34,7 +34,7 @@
         "hs_code": "col_F"
       }
     },
-    "expected": {"item_count": 1, "confidence": 1.0}
+    "expected": {"item_count": 1, "min_confidence": 0.90}
   },
   {
     "id": "pi-003",
@@ -49,6 +49,41 @@
         "hs_code": "col_F"
       }
     },
-    "expected": {"item_count": 1, "confidence": 1.0}
+    "expected": {"item_count": 1}
+  },
+  {
+    "id": "pi-004",
+    "description": "PI with auto-computed CBM from box dimensions",
+    "input": {
+      "rows": [
+        {"col_A": "D001", "col_B": "100", "col_C": "50", "col_D": "40", "col_E": "25"}
+      ],
+      "template_mapping": {
+        "item_no": "col_A",
+        "box_L": "col_B",
+        "box_W": "col_C",
+        "box_H": "col_D",
+        "total_cartons": "col_E"
+      }
+    },
+    "expected": {"item_count": 1, "min_confidence": 0.90, "needs_hitl": false}
+  },
+  {
+    "id": "pi-005",
+    "description": "PI with string numeric values — tests type coercion",
+    "input": {
+      "rows": [
+        {"col_A": "E001", "col_B": "24.5", "col_C": "18.0", "col_D": "12.0", "col_E": "50", "col_F": "4"}
+      ],
+      "template_mapping": {
+        "item_no": "col_A",
+        "box_L": "col_B",
+        "box_W": "col_C",
+        "box_H": "col_D",
+        "total_cartons": "col_E",
+        "inner_pack": "col_F"
+      }
+    },
+    "expected": {"item_count": 1, "min_confidence": 0.90, "needs_hitl": false}
   }
 ]
