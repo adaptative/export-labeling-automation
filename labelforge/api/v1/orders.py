@@ -790,22 +790,40 @@ async def _run_fusion(
             _order_upload_logger.info("No items to fuse for order %s", order_id)
             return
 
-        # Separate PO vs PI items based on which fields are present
-        # PO items have: upc, description, case_qty, total_qty
-        # PI items have: box_L, box_W, box_H, total_cartons
+        # Build PO and PI item lists for FusionAgent.
+        # After the extraction pipeline merges PO+PI data into each DB item,
+        # every item holds BOTH sets of fields.  Split each item's fields into
+        # its PO portion and PI portion so FusionAgent can join by item_no and
+        # run its deterministic cross-validation (UPC Luhn, dimension fit,
+        # weight) plus LLM material inference.
+        _PO_FIELDS = {
+            "item_no", "upc", "gtin", "description", "product_dims",
+            "case_qty", "total_qty", "weight_kg", "unit_weight_kg",
+            "material", "finish", "country_of_origin",
+        }
+        _PI_FIELDS = {
+            "item_no", "box_L", "box_W", "box_H", "total_cartons",
+            "inner_pack", "hs_code", "cbm",
+        }
+
         po_items: list[dict] = []
         pi_items: list[dict] = []
 
         for item in all_items:
-            data = item.data or {}
+            data = dict(item.data or {})
             data["item_no"] = item.item_no
-            if data.get("box_L") or data.get("box_W") or data.get("total_cartons"):
+
+            has_po = any(data.get(f) for f in ("upc", "description", "total_qty"))
+            has_pi = any(data.get(f) for f in ("box_L", "box_W", "total_cartons"))
+
+            if has_po:
+                po_items.append({k: v for k, v in data.items() if k in _PO_FIELDS})
+            if has_pi:
+                pi_items.append({k: v for k, v in data.items() if k in _PI_FIELDS})
+            if not has_po and not has_pi:
+                # Ambiguous — include in both so the join doesn't drop it
+                po_items.append(data)
                 pi_items.append(data)
-            elif data.get("upc") or data.get("description") or data.get("total_qty"):
-                po_items.append(data)
-            else:
-                # Ambiguous — add to PO by default
-                po_items.append(data)
 
         if not po_items and not pi_items:
             _order_upload_logger.info("No PO/PI items to fuse for order %s", order_id)
