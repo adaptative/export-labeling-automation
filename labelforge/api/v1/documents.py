@@ -301,64 +301,17 @@ async def _run_ai_classification(
     tenant_id: str,
     filename: str,
     storage_key: str,
+    order_id: str = "",
 ) -> None:
-    """Background task: run IntakeClassifierAgent and update DB classification."""
-    from labelforge.agents.intake_classifier import IntakeClassifierAgent
-    from labelforge.config import settings as app_settings
-    from labelforge.db.session import async_session_factory
-
-    from labelforge.core.doc_extract import extract_text
-    store = get_blob_store()
-    doc_content = ""
-    try:
-        data = await store.download(storage_key)
-        doc_content = extract_text(data, filename, max_chars=3000)
-    except Exception:
-        logger.warning("Could not read content for AI classification: %s", doc_id)
-
-    try:
-        from labelforge.core.llm import OpenAIProvider
-        provider = OpenAIProvider(api_key=app_settings.openai_api_key)
-        agent = IntakeClassifierAgent(provider)
-        result = await agent.execute({
-            "document_content": doc_content,
-            "filename": filename,
-        })
-
-        async with async_session_factory() as db:
-            cls_result = await db.execute(
-                select(DocumentClassification).where(
-                    DocumentClassification.document_id == doc_id,
-                    DocumentClassification.tenant_id == tenant_id,
-                )
-            )
-            classification = cls_result.scalar_one_or_none()
-            if classification:
-                classification.doc_class = result.data.get("doc_class", "UNKNOWN")
-                classification.confidence = result.confidence
-                classification.classification_status = "classified"
-                await db.commit()
-
-        logger.info(
-            "AI classification complete: doc=%s class=%s confidence=%.2f",
-            doc_id, result.data.get("doc_class"), result.confidence,
-        )
-    except Exception as exc:
-        logger.error("AI classification failed for %s: %s", doc_id, exc)
-        try:
-            async with async_session_factory() as db:
-                cls_result = await db.execute(
-                    select(DocumentClassification).where(
-                        DocumentClassification.document_id == doc_id,
-                        DocumentClassification.tenant_id == tenant_id,
-                    )
-                )
-                classification = cls_result.scalar_one_or_none()
-                if classification:
-                    classification.classification_status = "classified"
-                    await db.commit()
-        except Exception:
-            pass
+    """Background task: classify document then extract items. Delegates to orders module."""
+    from labelforge.api.v1.orders import _run_ai_classification as _orders_classify
+    await _orders_classify(
+        doc_id=doc_id,
+        tenant_id=tenant_id,
+        filename=filename,
+        storage_key=storage_key,
+        order_id=order_id,
+    )
 
 
 @router.post("/upload", response_model=DocumentUploadResponse, status_code=201)
@@ -459,6 +412,7 @@ async def upload_document(
         tenant_id=_user.tenant_id,
         filename=filename,
         storage_key=storage_key,
+        order_id=order_id,
     )
 
     return DocumentUploadResponse(
