@@ -470,6 +470,11 @@ async def _run_item_extraction(
         _order_upload_logger.info("No items extracted from %s for order %s", filename, order_id)
         return
 
+    _order_upload_logger.info(
+        "Extracted %d items (doc_class=%s) from %s for order %s",
+        len(items), doc_class, filename, order_id,
+    )
+
     # Persist items to DB
     try:
         async with async_session_factory() as db:
@@ -509,6 +514,30 @@ async def _run_item_extraction(
                     "Created %d items for order %s from %s",
                     created, order_id, filename,
                 )
+
+            # Chain: auto-trigger fusion if both PO and PI items now exist
+            existing_all = await db.execute(
+                select(OrderItemModel).where(
+                    OrderItemModel.order_id == order_id,
+                    OrderItemModel.tenant_id == tenant_id,
+                )
+            )
+            all_order_items = existing_all.scalars().all()
+            has_po = any(
+                (i.data or {}).get("upc") or (i.data or {}).get("description")
+                for i in all_order_items
+            )
+            has_pi = any(
+                (i.data or {}).get("box_L") or (i.data or {}).get("total_cartons")
+                for i in all_order_items
+            )
+            if has_po and has_pi:
+                _order_upload_logger.info(
+                    "Both PO and PI items exist for order %s — auto-triggering fusion",
+                    order_id,
+                )
+                await _run_fusion(order_id=order_id, tenant_id=tenant_id)
+
     except Exception as exc:
         _order_upload_logger.error("Failed to persist items for %s: %s", order_id, exc)
 
@@ -581,6 +610,158 @@ def _auto_detect_pi_mapping(rows: list[dict]) -> dict:
                 break
 
     return mapping
+
+
+async def _run_fusion(
+    order_id: str,
+    tenant_id: str,
+) -> None:
+    """Background task: fuse PO + PI items for an order.
+
+    Collects all PARSED items, groups by doc_class stored in item.data,
+    then runs FusionAgent to merge and validate.
+    """
+    from labelforge.agents.fusion import FusionAgent
+    from labelforge.config import settings as app_settings
+    from labelforge.db.models import OrderItemModel, ItemStateEnum
+    from labelforge.db.session import async_session_factory
+
+    try:
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(OrderItemModel).where(
+                    OrderItemModel.order_id == order_id,
+                    OrderItemModel.tenant_id == tenant_id,
+                )
+            )
+            all_items = result.scalars().all()
+
+        if not all_items:
+            _order_upload_logger.info("No items to fuse for order %s", order_id)
+            return
+
+        # Separate PO vs PI items based on which fields are present
+        # PO items have: upc, description, case_qty, total_qty
+        # PI items have: box_L, box_W, box_H, total_cartons
+        po_items: list[dict] = []
+        pi_items: list[dict] = []
+
+        for item in all_items:
+            data = item.data or {}
+            data["item_no"] = item.item_no
+            if data.get("box_L") or data.get("box_W") or data.get("total_cartons"):
+                pi_items.append(data)
+            elif data.get("upc") or data.get("description") or data.get("total_qty"):
+                po_items.append(data)
+            else:
+                # Ambiguous — add to PO by default
+                po_items.append(data)
+
+        if not po_items and not pi_items:
+            _order_upload_logger.info("No PO/PI items to fuse for order %s", order_id)
+            return
+
+        # Build LLM provider if API key is available
+        llm_provider = None
+        if app_settings.openai_api_key:
+            from labelforge.core.llm import OpenAIProvider
+            provider = OpenAIProvider(api_key=app_settings.openai_api_key)
+            llm_provider = _LLMProviderWrapper(provider, app_settings.llm_default_model)
+
+        agent = FusionAgent(llm_provider=llm_provider)
+        fusion_result = await agent.execute({
+            "po_items": po_items,
+            "pi_items": pi_items,
+        })
+
+        fused_items = fusion_result.data.get("fused_items", [])
+        issues = fusion_result.data.get("issues", [])
+
+        _order_upload_logger.info(
+            "Fusion complete for order %s: %d fused items, %d issues, confidence=%.2f",
+            order_id, len(fused_items), len(issues), fusion_result.confidence,
+        )
+
+        # Update existing items with fused data and advance state
+        async with async_session_factory() as db:
+            for fused in fused_items:
+                fused_item_no = str(fused.get("item_no", "")).strip()
+                if not fused_item_no:
+                    continue
+
+                existing = await db.execute(
+                    select(OrderItemModel).where(
+                        OrderItemModel.order_id == order_id,
+                        OrderItemModel.tenant_id == tenant_id,
+                        OrderItemModel.item_no == fused_item_no,
+                    )
+                )
+                db_item = existing.scalar_one_or_none()
+                if db_item:
+                    db_item.data = fused
+                    new_state = (
+                        ItemStateEnum.FUSED.value
+                        if fusion_result.success
+                        else ItemStateEnum.HUMAN_BLOCKED.value
+                    )
+                    db_item.state = new_state
+
+            await db.commit()
+
+        _order_upload_logger.info(
+            "Fusion persisted for order %s: %d items updated to state=%s",
+            order_id, len(fused_items),
+            "FUSED" if fusion_result.success else "HUMAN_BLOCKED",
+        )
+
+    except Exception as exc:
+        _order_upload_logger.error("Fusion failed for order %s: %s", order_id, exc)
+
+
+@router.post("/{order_id}/fuse", status_code=200)
+async def fuse_order_items(
+    order_id: str,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Trigger fusion of PO + PI items for an order.
+
+    Merges data from purchase order and proforma invoice items,
+    validates cross-document consistency, and advances item state to FUSED.
+    """
+    # Verify order exists
+    order_check = await db.execute(
+        select(Order.id).where(
+            Order.id == order_id,
+            Order.tenant_id == _user.tenant_id,
+        )
+    )
+    if order_check.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Check order has items
+    item_count = await db.execute(
+        select(func.count()).select_from(OrderItemModel).where(
+            OrderItemModel.order_id == order_id,
+            OrderItemModel.tenant_id == _user.tenant_id,
+        )
+    )
+    count = item_count.scalar() or 0
+    if count == 0:
+        raise HTTPException(status_code=400, detail="Order has no items to fuse")
+
+    background_tasks.add_task(
+        _run_fusion,
+        order_id=order_id,
+        tenant_id=_user.tenant_id,
+    )
+
+    return {
+        "order_id": order_id,
+        "message": f"Fusion started for {count} items. Poll GET /orders/{order_id} to check state.",
+        "item_count": count,
+    }
 
 
 @router.post("/{order_id}/documents", status_code=201)

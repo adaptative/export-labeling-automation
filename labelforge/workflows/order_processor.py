@@ -133,6 +133,81 @@ async def intake_classify_activity(input: ActivityInput) -> ActivityOutput:
 async def parse_document_activity(input: ActivityInput) -> ActivityOutput:
     """Parse classified documents to extract structured data (PO/PI line items)."""
     activity.logger.info("Parsing document for item %s", input.item_id)
+
+    doc_class = input.payload.get("doc_class", "UNKNOWN")
+    doc_content = input.payload.get("document_content", "")
+
+    if not doc_content:
+        return ActivityOutput(
+            success=True,
+            item_id=input.item_id,
+            new_state=ItemState.PARSED.value,
+            data=input.payload,
+        )
+
+    try:
+        if doc_class == "PURCHASE_ORDER":
+            from labelforge.agents.po_parser import POParserAgent
+            from labelforge.core.llm import OpenAIProvider
+            from labelforge.config import settings
+            from labelforge.api.v1.orders import _LLMProviderWrapper
+
+            provider = OpenAIProvider(api_key=settings.openai_api_key)
+            wrapper = _LLMProviderWrapper(provider, settings.llm_default_model)
+            agent = POParserAgent(llm_provider=wrapper)
+            result = await agent.execute({"document_content": doc_content})
+
+            output_data = {
+                **input.payload,
+                "items": result.data.get("items", []),
+                "issues": result.data.get("issues", []),
+                "page_count": result.data.get("page_count", 1),
+            }
+            return ActivityOutput(
+                success=result.success,
+                item_id=input.item_id,
+                new_state=ItemState.PARSED.value,
+                data=output_data,
+                needs_hitl=result.needs_hitl,
+                hitl_reason=result.hitl_reason,
+                cost_usd=result.cost,
+            )
+
+        elif doc_class == "PROFORMA_INVOICE":
+            from labelforge.agents.pi_parser import PIParserAgent
+            from labelforge.api.v1.orders import _text_to_rows, _auto_detect_pi_mapping
+
+            rows = _text_to_rows(doc_content)
+            if rows:
+                mapping = _auto_detect_pi_mapping(rows)
+                agent = PIParserAgent()
+                result = await agent.execute({
+                    "rows": rows,
+                    "template_mapping": mapping,
+                })
+                output_data = {
+                    **input.payload,
+                    "items": result.data.get("items", []),
+                    "warnings": result.data.get("warnings", []),
+                    "row_count": result.data.get("row_count", 0),
+                }
+                return ActivityOutput(
+                    success=result.success,
+                    item_id=input.item_id,
+                    new_state=ItemState.PARSED.value,
+                    data=output_data,
+                    cost_usd=result.cost,
+                )
+
+    except Exception as exc:
+        activity.logger.error("Parse failed for item %s: %s", input.item_id, exc)
+        return ActivityOutput(
+            success=False,
+            item_id=input.item_id,
+            new_state=ItemState.FAILED.value,
+            data={**input.payload, "error": str(exc)},
+        )
+
     return ActivityOutput(
         success=True,
         item_id=input.item_id,
@@ -143,14 +218,61 @@ async def parse_document_activity(input: ActivityInput) -> ActivityOutput:
 
 @activity.defn
 async def fuse_data_activity(input: ActivityInput) -> ActivityOutput:
-    """Fuse PO + PI data for an item."""
+    """Fuse PO + PI data for an item using the FusionAgent."""
     activity.logger.info("Fusing data for item %s", input.item_id)
-    return ActivityOutput(
-        success=True,
-        item_id=input.item_id,
-        new_state=ItemState.FUSED.value,
-        data=input.payload,
-    )
+
+    po_items = input.payload.get("po_items", [])
+    pi_items = input.payload.get("pi_items", [])
+
+    if not po_items and not pi_items:
+        # No data to fuse — pass through
+        return ActivityOutput(
+            success=True,
+            item_id=input.item_id,
+            new_state=ItemState.FUSED.value,
+            data=input.payload,
+        )
+
+    try:
+        from labelforge.agents.fusion import FusionAgent
+        from labelforge.config import settings
+
+        llm_provider = None
+        if settings.openai_api_key:
+            from labelforge.core.llm import OpenAIProvider
+            from labelforge.api.v1.orders import _LLMProviderWrapper
+            provider = OpenAIProvider(api_key=settings.openai_api_key)
+            llm_provider = _LLMProviderWrapper(provider, settings.llm_default_model)
+
+        agent = FusionAgent(llm_provider=llm_provider)
+        result = await agent.execute({
+            "po_items": po_items,
+            "pi_items": pi_items,
+        })
+
+        output_data = {
+            **input.payload,
+            "fused_items": result.data.get("fused_items", []),
+            "issues": result.data.get("issues", []),
+        }
+        return ActivityOutput(
+            success=result.success,
+            item_id=input.item_id,
+            new_state=ItemState.FUSED.value,
+            data=output_data,
+            needs_hitl=result.needs_hitl,
+            hitl_reason=result.hitl_reason,
+            cost_usd=result.cost,
+        )
+
+    except Exception as exc:
+        activity.logger.error("Fusion failed for item %s: %s", input.item_id, exc)
+        return ActivityOutput(
+            success=False,
+            item_id=input.item_id,
+            new_state=ItemState.FAILED.value,
+            data={**input.payload, "error": str(exc)},
+        )
 
 
 @activity.defn
