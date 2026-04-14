@@ -159,13 +159,13 @@ async def seed_if_empty() -> None:
 
         doc_classes = [
             DocumentClassification(id="dc-001", document_id="doc-001", tenant_id=_T,
-                                   doc_class="PURCHASE_ORDER", confidence=0.98),
+                                   doc_class="PURCHASE_ORDER", confidence=0.98, classification_status="classified"),
             DocumentClassification(id="dc-002", document_id="doc-002", tenant_id=_T,
-                                   doc_class="PROFORMA_INVOICE", confidence=0.96),
+                                   doc_class="PROFORMA_INVOICE", confidence=0.96, classification_status="classified"),
             DocumentClassification(id="dc-003", document_id="doc-003", tenant_id=_T,
-                                   doc_class="PURCHASE_ORDER", confidence=0.97),
+                                   doc_class="PURCHASE_ORDER", confidence=0.97, classification_status="classified"),
             DocumentClassification(id="dc-004", document_id="doc-004", tenant_id=_T,
-                                   doc_class="WARNING_LABELS", confidence=0.91),
+                                   doc_class="WARNING_LABELS", confidence=0.91, classification_status="classified"),
         ]
         session.add_all(doc_classes)
 
