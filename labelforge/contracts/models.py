@@ -317,6 +317,8 @@ class ImporterProfile(BaseModel):
     }})
 
     importer_id: str
+    name: Optional[str] = None
+    code: Optional[str] = None
     brand_treatment: Optional[dict] = None
     panel_layouts: Optional[dict] = None
     handling_symbol_rules: Optional[dict] = None
