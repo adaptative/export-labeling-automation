@@ -268,15 +268,15 @@ class TestRunItemExtraction:
             assert mock_db.add.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_deduplication_skips_existing_items(self):
-        """Items already in the DB should be skipped."""
+    async def test_deduplication_merges_existing_items(self):
+        """Items already in the DB should be merged (PI data into PO), not skipped."""
         from labelforge.agents.base import AgentResult
 
         mock_result = AgentResult(
             success=True,
             data={"items": [
-                {"item_no": "001", "description": "Existing"},
-                {"item_no": "002", "description": "New"},
+                {"item_no": "001", "box_L": 10.0, "box_W": 5.0},
+                {"item_no": "002", "box_L": 20.0, "box_W": 8.0},
             ]},
             confidence=0.90,
         )
@@ -288,11 +288,17 @@ class TestRunItemExtraction:
             mock_agent.execute.return_value = mock_result
             MockPI.return_value = mock_agent
 
+            # Simulate existing item "001" in DB
+            existing_item = MagicMock()
+            existing_item.item_no = "001"
+            existing_item.data = {"item_no": "001", "upc": "123456"}
+
             mock_db = AsyncMock()
-            mock_existing = MagicMock()
-            # Item "001" already exists
-            mock_existing.all.return_value = [("001",)]
-            mock_db.execute.return_value = mock_existing
+            mock_scalars = MagicMock()
+            mock_scalars.all.return_value = [existing_item]
+            mock_execute_result = MagicMock()
+            mock_execute_result.scalars.return_value = mock_scalars
+            mock_db.execute.return_value = mock_execute_result
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -304,12 +310,15 @@ class TestRunItemExtraction:
                 order_id="ORD-001",
                 tenant_id="tnt-001",
                 doc_class="PROFORMA_INVOICE",
-                doc_content="item_no\tbox_l\nA1\t10\n002\t20",
+                doc_content="item_no\tbox_l\n001\t10\n002\t20",
                 filename="PI.txt",
             )
 
-            # Only 1 item should be added (002), not 001
-            assert mock_db.add.call_count == 1
+            # "001" should be merged (data updated), "002" should be added
+            assert mock_db.add.call_count == 1  # Only "002" is new
+            # Verify the existing item's data was merged with PI fields
+            assert existing_item.data["box_L"] == 10.0
+            assert existing_item.data["upc"] == "123456"  # Original PO data preserved
 
     @pytest.mark.asyncio
     async def test_unknown_item_no_skipped(self):
@@ -334,9 +343,11 @@ class TestRunItemExtraction:
             MockPI.return_value = mock_agent
 
             mock_db = AsyncMock()
-            mock_existing = MagicMock()
-            mock_existing.all.return_value = []
-            mock_db.execute.return_value = mock_existing
+            mock_scalars = MagicMock()
+            mock_scalars.all.return_value = []  # No existing items
+            mock_execute_result = MagicMock()
+            mock_execute_result.scalars.return_value = mock_scalars
+            mock_db.execute.return_value = mock_execute_result
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
