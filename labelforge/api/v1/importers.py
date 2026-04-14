@@ -31,6 +31,8 @@ class ImporterListResponse(BaseModel):
 def _profile_to_contract(importer: Importer, profile: Optional[ImporterProfileModel]) -> ImporterProfile:
     return ImporterProfile(
         importer_id=importer.id,
+        name=importer.name,
+        code=importer.code,
         brand_treatment=profile.brand_treatment if profile else None,
         panel_layouts=profile.panel_layouts if profile else None,
         handling_symbol_rules=profile.handling_symbol_rules if profile else None,

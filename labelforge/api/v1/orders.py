@@ -334,8 +334,11 @@ async def upload_order_document(
         _documents,
         DocumentRecord,
         _classify_by_filename,
+        _guess_doc_class,
     )
     from labelforge.core.blobstore import BlobMeta
+    from labelforge.db.models import Document as DocumentModel, DocumentClassification
+    from uuid import uuid4
 
     # Verify order exists in DB
     order_check = await db.execute(
@@ -364,6 +367,29 @@ async def upload_order_document(
 
     quick_class, quick_confidence = _classify_by_filename(filename)
 
+    # Persist to database
+    new_doc = DocumentModel(
+        id=doc_id,
+        tenant_id=_user.tenant_id,
+        order_id=order_id,
+        filename=filename,
+        s3_key=storage_key,
+        size_bytes=size_bytes,
+    )
+    db.add(new_doc)
+
+    guessed_class = _guess_doc_class(filename)
+    classification = DocumentClassification(
+        id=str(uuid4()),
+        document_id=doc_id,
+        tenant_id=_user.tenant_id,
+        doc_class=guessed_class.value,
+        confidence=quick_confidence,
+    )
+    db.add(classification)
+    await db.commit()
+
+    # Also track in in-memory registry for BlobStore features
     doc = DocumentRecord(
         id=doc_id,
         order_id=order_id,
