@@ -339,6 +339,17 @@ class WarningLabel(Base):
     icon_asset_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     svg_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="approved", default="approved"
+    )
+    size_mm_width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    size_mm_height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    trigger_conditions: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    variants: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    approved_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow(), onupdate=_utcnow())
 
