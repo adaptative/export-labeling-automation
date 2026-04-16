@@ -1,0 +1,24 @@
+# Prometheus scrape config for the Labelforge API (TASK-041).
+#
+# Run locally with:
+#   prometheus --config.file=ops/prometheus/prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: labelforge-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["labelforge-api:8000"]
+        labels:
+          service: labelforge
+          env: production

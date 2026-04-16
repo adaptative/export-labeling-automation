@@ -1,0 +1,123 @@
+# Alert rules for the Labelforge API (TASK-041).
+#
+# Severity convention:
+#   critical  -> routed to PagerDuty in AlertManager config.
+#   warning   -> email + Slack #ops.
+#
+# Prometheus expression evaluation cadence: 15s (see prometheus.yml).
+groups:
+  - name: labelforge.api.availability
+    interval: 30s
+    rules:
+      - alert: LabelforgeHighErrorRate
+        expr: |
+          (
+            sum(rate(labelforge_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(labelforge_requests_total[5m])), 1)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: labelforge
+          runbook: https://runbooks.labelforge.dev/high-error-rate
+        annotations:
+          summary: "Labelforge error rate > 5% for 5m"
+          description: |
+            Labelforge /api 5xx rate is {{ $value | humanizePercentage }} over
+            the last 5 minutes. Check recent deploys, DB latency, upstream
+            providers.
+
+      - alert: LabelforgeP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(labelforge_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+          service: labelforge
+        annotations:
+          summary: "Labelforge p95 latency > 2s"
+          description: "p95 HTTP latency is {{ $value }}s (threshold 2s)."
+
+  - name: labelforge.cost
+    interval: 60s
+    rules:
+      - alert: LabelforgeCostBreach
+        expr: |
+          sum(increase(labelforge_cost_usd_total[1h]))
+          > 25
+        for: 0m
+        labels:
+          severity: critical
+          service: labelforge
+          category: cost
+        annotations:
+          summary: "Hourly AI cost > $25"
+          description: |
+            Aggregated labelforge_cost_usd_total grew by {{ $value | printf
+            "%.2f" }} USD in the last hour. Investigate runaway agents or
+            token spikes.
+
+  - name: labelforge.queues
+    interval: 60s
+    rules:
+      - alert: LabelforgeHiTLQueueDepthHigh
+        expr: |
+          sum by (tenant_id) (labelforge_hitl_queue_depth) > 100
+        for: 10m
+        labels:
+          severity: warning
+          service: labelforge
+        annotations:
+          summary: "HiTL queue depth > 100 for tenant {{ $labels.tenant_id }}"
+          description: |
+            Current queue depth is {{ $value }}. Escalate to on-call reviewer.
+
+      - alert: LabelforgeSLABreach
+        expr: |
+          increase(labelforge_errors_total{category="sla_breach"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: labelforge
+          category: sla
+        annotations:
+          summary: "SLA breach reported"
+          description: "A HiTL thread passed its SLA deadline."
+
+  - name: labelforge.automation
+    interval: 60s
+    rules:
+      - alert: LabelforgeAutomationRateLow
+        expr: |
+          min(labelforge_automation_rate) < 60
+        for: 15m
+        labels:
+          severity: warning
+          service: labelforge
+        annotations:
+          summary: "Automation rate dropped below 60%"
+          description: |
+            Minimum automation rate across tenants is {{ $value }}% for 15m —
+            target corridor is 60-85%.
+
+  - name: labelforge.agents
+    interval: 60s
+    rules:
+      - alert: LabelforgeAgentFailureSpike
+        expr: |
+          sum by (agent_id) (
+            rate(labelforge_agent_calls_total{success="false"}[5m])
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: labelforge
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} failing > 0.5 req/s"
+          description: |
+            Failure rate for {{ $labels.agent_id }} is {{ $value }}/s. Check
+            recent model/provider health.

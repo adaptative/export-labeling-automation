@@ -29,6 +29,14 @@ dependencies = [
     "passlib[bcrypt]>=1.7.4",
     "openai>=1.30.0",
     "structlog>=24.1.0",
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
+    "opentelemetry-instrumentation-httpx>=0.48b0",
+    "opentelemetry-instrumentation-logging>=0.48b0",
+    "prometheus-client>=0.20.0",
 ]
 
 [project.optional-dependencies]
@@ -84,4 +92,6 @@ testpaths = ["tests"]
 markers = [
     "integration: marks tests requiring external services",
     "asyncio: marks tests as async",
+    "stress: marks multi-tenancy / concurrency / load stress tests (opt-in)",
+    "postgres: marks tests that require a real PostgreSQL backend",
 ]

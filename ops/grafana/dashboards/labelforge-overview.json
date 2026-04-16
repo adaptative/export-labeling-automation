@@ -1,0 +1,160 @@
+{
+  "title": "Labelforge — Overview",
+  "uid": "labelforge-overview",
+  "tags": ["labelforge", "api", "observability"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "tenant_id",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(labelforge_cost_usd_total, tenant_id)",
+        "includeAll": true,
+        "multi": true,
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "API request rate",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(labelforge_requests_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 2,
+      "title": "API p95 latency",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, path) (rate(labelforge_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{path}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 3,
+      "title": "HTTP error rate (5xx / all)",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 8, "w": 6, "h": 6},
+      "targets": [
+        {
+          "expr": "sum(rate(labelforge_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(labelforge_requests_total[5m])), 1)"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.02}, {"color": "red", "value": 0.05}]}}}
+    },
+    {
+      "id": 4,
+      "title": "Cost (USD / hour)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 6, "y": 8, "w": 6, "h": 6},
+      "targets": [
+        {
+          "expr": "sum(rate(labelforge_cost_usd_total[5m])) * 3600"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
+    },
+    {
+      "id": 5,
+      "title": "HiTL queue depth (by tenant)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 6},
+      "targets": [
+        {
+          "expr": "sum by (tenant_id) (labelforge_hitl_queue_depth)",
+          "legendFormat": "{{tenant_id}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Automation rate (%)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 7},
+      "targets": [
+        {
+          "expr": "avg by (tenant_id) (labelforge_automation_rate)",
+          "legendFormat": "{{tenant_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 60},
+              {"color": "green", "value": 70}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Agent call rate (by agent)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 7},
+      "targets": [
+        {
+          "expr": "sum by (agent_id) (rate(labelforge_agent_calls_total[5m]))",
+          "legendFormat": "{{agent_id}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Agent p95 latency",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 0, "y": 21, "w": 12, "h": 7},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, agent_id) (rate(labelforge_agent_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{agent_id}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 9,
+      "title": "Errors by category",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": {"x": 12, "y": 21, "w": 12, "h": 7},
+      "targets": [
+        {
+          "expr": "sum by (category) (rate(labelforge_errors_total[5m]))",
+          "legendFormat": "{{category}}"
+        }
+      ]
+    }
+  ]
+}
