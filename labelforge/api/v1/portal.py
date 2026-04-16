@@ -25,14 +25,16 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from labelforge.api.v1.auth import get_current_user
+from labelforge.api.v1.documents import get_blob_store
 from labelforge.core.auth import TokenPayload
 from labelforge.db.models import (
-    AuditLog, Importer, Order, OrderItemModel, PortalToken,
+    Artifact, AuditLog, Importer, Order, OrderItemModel, PortalToken,
 )
 from labelforge.db.session import get_db
 
@@ -399,4 +401,106 @@ async def printer_confirm(
         ok=True, status=row.status, order_id=row.order_id,
         action_taken_at=now,
         message="Receipt confirmed. Bundle is now delivered.",
+    )
+
+
+# ── Token-scoped bundle download (printer) ──────────────────────────────────
+
+
+async def _latest_bundle_for_item(
+    db: AsyncSession, item_id: str, tenant_id: str,
+) -> Optional[Artifact]:
+    """Return the newest bundle_zip artifact for a given item, or None."""
+    result = await db.execute(
+        select(Artifact)
+        .where(
+            Artifact.order_item_id == item_id,
+            Artifact.tenant_id == tenant_id,
+            Artifact.artifact_type == "bundle_zip",
+        )
+        .order_by(Artifact.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+@router.get("/printer/{token}/items/{item_id}/bundle")
+async def get_printer_item_bundle(
+    token: str, item_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Stream a printer-ready bundle ZIP for an item, authed by portal token.
+
+    The printer portal does not issue JWTs; this endpoint accepts the opaque
+    bearer token in the URL and validates three things in order:
+
+    1. The token exists, is role=printer, and isn't expired.
+    2. The requested item belongs to the token's order (prevents a printer
+       from fishing bundles for orders they weren't issued a link for).
+    3. A bundle artifact row exists and its blob is present.
+
+    Returns the same structured-404 shape as :mod:`item_artifacts` so the
+    UI can render a "not generated" state rather than crashing.
+    """
+    row = await _load_token(db, token, expected_role="printer")
+    # Do NOT require `active` — allow re-download after confirm for reprints.
+
+    item = (
+        await db.execute(
+            select(OrderItemModel).where(
+                OrderItemModel.id == item_id,
+                OrderItemModel.tenant_id == row.tenant_id,
+                OrderItemModel.order_id == row.order_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not in this order")
+
+    artifact = await _latest_bundle_for_item(db, item_id, row.tenant_id)
+    if artifact is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "reason": "not_generated",
+                "detail": "No bundle has been generated for this item yet.",
+                "item_id": item_id,
+            },
+        )
+
+    store = get_blob_store()
+    try:
+        data = await store.download(artifact.s3_key)
+    except (FileNotFoundError, KeyError):
+        return JSONResponse(
+            status_code=404,
+            content={
+                "reason": "blob_missing",
+                "detail": "Bundle row exists but the ZIP is missing from storage.",
+                "artifact_id": artifact.id,
+                "storage_key": artifact.s3_key,
+            },
+        )
+
+    # Light-touch audit — a download isn't a terminal action so we only log
+    # it; status stays as-is so the operator can still confirm.
+    await _audit(
+        db, tenant_id=row.tenant_id,
+        action="portal_printer_bundle_downloaded",
+        resource_type="order_item", resource_id=item_id,
+        actor=(row.email or "printer-portal"),
+        detail="Printer downloaded bundle via portal",
+        details={"token_prefix": row.token[:8], "artifact_id": artifact.id},
+    )
+    await db.commit()
+
+    filename = (artifact.s3_key or "").split("/")[-1] or f"{item.item_no}_bundle.zip"
+    return Response(
+        content=data,
+        media_type=artifact.mime_type or "application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Artifact-Id": artifact.id,
+            "X-Content-Hash": artifact.content_hash or "",
+        },
     )

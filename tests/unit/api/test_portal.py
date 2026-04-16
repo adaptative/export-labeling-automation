@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import asyncio
 from typing import Optional
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 
+from labelforge.api.v1 import documents as docs_mod
+from labelforge.core.blobstore import MemoryBlobStore
 from labelforge.db import session as session_mod
-from labelforge.db.models import AuditLog, PortalToken
+from labelforge.db.models import Artifact, AuditLog, PortalToken
 
 
 def _await(coro):
@@ -220,3 +223,103 @@ class TestPrinterPortal:
         token = _create_token(client, admin_headers, role="printer")
         resp = client.get(f"/api/v1/portal/importer/{token}")
         assert resp.status_code == 404
+
+
+# ── Printer bundle download (token-scoped) ──────────────────────────────────
+
+
+@pytest.fixture
+def mem_blob_store(monkeypatch):
+    """In-memory blob store that both documents.py and portal.py read from."""
+    store = MemoryBlobStore()
+    monkeypatch.setattr(docs_mod, "_blob_store", store)
+    return store
+
+
+async def _plant_bundle_artifact(
+    *, item_id: str, tenant_id: str, data: bytes, store: MemoryBlobStore,
+) -> str:
+    key = f"artifacts/bundle_zip/{uuid4()}.zip"
+    meta = await store.upload(key, data, content_type="application/zip")
+    aid = str(uuid4())
+    async with session_mod.async_session_factory() as db:
+        db.add(Artifact(
+            id=aid, tenant_id=tenant_id, order_item_id=item_id,
+            artifact_type="bundle_zip", s3_key=key,
+            content_hash=meta.sha256, size_bytes=len(data),
+            mime_type="application/zip", provenance={},
+        ))
+        await db.commit()
+    return aid
+
+
+class TestPrinterBundleDownload:
+    def test_streams_bundle_zip_via_token(self, client, admin_headers, mem_blob_store):
+        token = _create_token(client, admin_headers, role="printer")
+        zip_body = b"PK\x03\x04" + b"fake-bundle-body"
+        _await(_plant_bundle_artifact(
+            item_id="item-001", tenant_id="tnt-nakoda-001",
+            data=zip_body, store=mem_blob_store,
+        ))
+        # No auth headers — the token alone authenticates the download.
+        resp = client.get(f"/api/v1/portal/printer/{token}/items/item-001/bundle")
+        assert resp.status_code == 200
+        assert resp.content == zip_body
+        assert resp.headers["content-type"].startswith("application/zip")
+        assert "attachment" in resp.headers["content-disposition"]
+
+    def test_missing_bundle_returns_structured_404(self, client, admin_headers, mem_blob_store):
+        token = _create_token(client, admin_headers, role="printer")
+        resp = client.get(f"/api/v1/portal/printer/{token}/items/item-001/bundle")
+        assert resp.status_code == 404
+        assert resp.json().get("reason") == "not_generated"
+
+    def test_wrong_order_item_404(self, client, admin_headers, mem_blob_store):
+        # Mint token for a different order — item-001 is on ORD-2026-0042.
+        resp = client.post(
+            "/api/v1/portal/tokens",
+            json={"order_id": "ORD-2026-0043", "role": "printer"},
+            headers=admin_headers,
+        )
+        # If that order doesn't exist in the seed this will 404 — skip gracefully.
+        if resp.status_code != 201:
+            pytest.skip("Secondary order not seeded")
+        other_token = resp.json()["token"]
+        _await(_plant_bundle_artifact(
+            item_id="item-001", tenant_id="tnt-nakoda-001",
+            data=b"PK\x03\x04body", store=mem_blob_store,
+        ))
+        resp = client.get(
+            f"/api/v1/portal/printer/{other_token}/items/item-001/bundle"
+        )
+        assert resp.status_code == 404
+
+    def test_importer_token_rejected(self, client, admin_headers, mem_blob_store):
+        token = _create_token(client, admin_headers, role="importer")
+        _await(_plant_bundle_artifact(
+            item_id="item-001", tenant_id="tnt-nakoda-001",
+            data=b"PK\x03\x04body", store=mem_blob_store,
+        ))
+        resp = client.get(f"/api/v1/portal/printer/{token}/items/item-001/bundle")
+        assert resp.status_code == 404
+
+    def test_invalid_token_404(self, client, mem_blob_store):
+        resp = client.get(
+            "/api/v1/portal/printer/not-a-real-token/items/item-001/bundle"
+        )
+        assert resp.status_code == 404
+
+    def test_download_still_works_after_confirm(self, client, admin_headers, mem_blob_store):
+        """Reprints should remain possible — confirm isn't a lock-out."""
+        token = _create_token(client, admin_headers, role="printer")
+        _await(_plant_bundle_artifact(
+            item_id="item-001", tenant_id="tnt-nakoda-001",
+            data=b"PK\x03\x04body", store=mem_blob_store,
+        ))
+        # Confirm first.
+        c = client.post(f"/api/v1/portal/printer/{token}/confirm", json={})
+        assert c.status_code == 200
+        # Download after confirm still succeeds.
+        d = client.get(f"/api/v1/portal/printer/{token}/items/item-001/bundle")
+        assert d.status_code == 200
+        assert d.content == b"PK\x03\x04body"
