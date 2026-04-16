@@ -523,6 +523,36 @@ class BreakerEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
 
 
+# ── Portal Tokens (INT-017, Sprint-13) ─────────────────────────────────────
+
+class PortalToken(Base):
+    """Opaque bearer token used by importer/printer portals (INT-017).
+
+    Separate from JWT auth: portal users access ``/api/v1/portal/{role}/{token}``
+    without an account, via a one-time URL shared by ops.  Each token is
+    scoped to a single order and role (``importer`` or ``printer``).
+    Actions recorded via :class:`AuditLog` with ``actor_type='portal'``.
+    """
+    __tablename__ = "portal_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    order_id: Mapped[str] = mapped_column(String(36), ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # importer | printer
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")  # active | approved | rejected | confirmed | expired
+    email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    action_taken_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_utcnow())
+
+    __table_args__ = (
+        Index("ix_portal_tokens_order_role", "order_id", "role"),
+    )
+
+
 # ── Materialized view SQL (PostgreSQL only) ─────────────────────────────────
 
 ORDER_STATE_V_SQL = """
