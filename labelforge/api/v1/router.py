@@ -42,6 +42,7 @@ api_router.include_router(rules.router)
 api_router.include_router(importers.router)
 api_router.include_router(artifacts.router)
 api_router.include_router(notifications.router)
+api_router.include_router(notifications.users_router)
 api_router.include_router(settings.router)
 api_router.include_router(warning_labels.router)
 
