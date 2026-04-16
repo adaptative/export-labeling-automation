@@ -9,6 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from labelforge.config import settings
 from labelforge.api.v1.router import api_router
 from labelforge.api.v1.errors import register_error_handlers
+from labelforge.core.logging import (
+    RequestLoggingMiddleware,
+    configure_logging,
+    get_logger,
+)
+
+# Configure structured JSON logging before any other module emits logs.
+configure_logging()
+_log = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -37,14 +46,16 @@ async def lifespan(app: FastAPI):
             set_default_cache(RedisCompletionCache(redis_client))
             hitl_router = RedisMessageRouter(redis_client)
             set_message_router(hitl_router)
-            import logging
-            logging.getLogger(__name__).info(
-                "Redis connected (LLM cache + HiTL router): %s", settings.redis_url,
+            _log.info(
+                "redis.connected",
+                component="llm_cache+hitl_router",
+                url=settings.redis_url,
             )
         except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Redis unavailable, using in-memory (LLM cache + HiTL router): %s", exc,
+            _log.warning(
+                "redis.unavailable",
+                component="llm_cache+hitl_router",
+                error=str(exc),
             )
 
     yield
@@ -68,6 +79,10 @@ app = FastAPI(
     openapi_url="/api/v1/openapi.json",
     lifespan=lifespan,
 )
+
+# Structured request/response logging. Installed before CORS so every
+# request gets a request_id (logged even on preflight).
+app.add_middleware(RequestLoggingMiddleware)
 
 # CORS
 app.add_middleware(
