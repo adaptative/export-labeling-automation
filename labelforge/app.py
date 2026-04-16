@@ -19,23 +19,42 @@ async def lifespan(app: FastAPI):
     await create_all_tables()
     await seed_if_empty()
 
-    # Wire Redis-backed LLM completion cache
+    # Wire Redis-backed LLM completion cache + HiTL MessageRouter. The
+    # router falls back to in-memory when Redis is unavailable so tests
+    # and single-worker dev work without extra setup.
     redis_client = None
+    hitl_router = None
     if settings.redis_url and settings.app_env != "test":
         try:
             import redis.asyncio as aioredis
             from labelforge.core.llm import RedisCompletionCache, set_default_cache
+            from labelforge.services.hitl import (
+                RedisMessageRouter,
+                set_message_router,
+            )
             redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
             await redis_client.ping()
             set_default_cache(RedisCompletionCache(redis_client))
+            hitl_router = RedisMessageRouter(redis_client)
+            set_message_router(hitl_router)
             import logging
-            logging.getLogger(__name__).info("Redis LLM cache connected: %s", settings.redis_url)
+            logging.getLogger(__name__).info(
+                "Redis connected (LLM cache + HiTL router): %s", settings.redis_url,
+            )
         except Exception as exc:
             import logging
-            logging.getLogger(__name__).warning("Redis LLM cache unavailable, using in-memory: %s", exc)
+            logging.getLogger(__name__).warning(
+                "Redis unavailable, using in-memory (LLM cache + HiTL router): %s", exc,
+            )
 
     yield
 
+    if hitl_router:
+        from labelforge.services.hitl import set_message_router
+        try:
+            await hitl_router.aclose()
+        finally:
+            set_message_router(None)
     if redis_client:
         await redis_client.aclose()
 
