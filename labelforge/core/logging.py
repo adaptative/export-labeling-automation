@@ -42,7 +42,15 @@ import structlog
 _LOG_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("labelforge_log_context", default={})
 
 # Canonical ordering for known context keys (helps reading JSON logs).
-_CONTEXT_KEYS = ("tenant_id", "request_id", "user_id", "agent_id", "workflow_id")
+_CONTEXT_KEYS = (
+    "tenant_id",
+    "request_id",
+    "user_id",
+    "agent_id",
+    "workflow_id",
+    "trace_id",
+    "span_id",
+)
 
 
 def get_context() -> Mapping[str, Any]:
@@ -78,7 +86,9 @@ def clear_context(*keys: str) -> None:
 def _merge_context_processor(
     logger: Any, method_name: str, event_dict: MutableMapping[str, Any]
 ) -> MutableMapping[str, Any]:
-    """structlog processor that merges the ContextVar into every event."""
+    """structlog processor that merges the ContextVar + active OTel span
+    into every event.
+    """
     ctx = _LOG_CONTEXT.get()
     if ctx:
         for key in _CONTEXT_KEYS:
@@ -88,6 +98,21 @@ def _merge_context_processor(
         for key, val in ctx.items():
             if key not in _CONTEXT_KEYS and key not in event_dict:
                 event_dict[key] = val
+
+    # Tag every log with the active span so Jaeger/Grafana can jump
+    # between logs and traces. Import lazily to avoid import-cycle with
+    # labelforge.core.tracing.
+    if "trace_id" not in event_dict or "span_id" not in event_dict:
+        try:
+            from labelforge.core.tracing import get_trace_context
+
+            trace_id, span_id = get_trace_context()
+            if trace_id and "trace_id" not in event_dict:
+                event_dict["trace_id"] = trace_id
+            if span_id and "span_id" not in event_dict:
+                event_dict["span_id"] = span_id
+        except Exception:  # pragma: no cover — defensive only
+            pass
     return event_dict
 
 

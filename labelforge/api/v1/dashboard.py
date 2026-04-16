@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from labelforge.api.v1.auth import get_current_user
 from labelforge.contracts import compute_order_state, OrderItem as ContractOrderItem, OrderState
 from labelforge.core.auth import TokenPayload
+from labelforge.core.metrics import observe_queue_depth, set_automation_rate
 from labelforge.db.session import get_db
 from labelforge.db.models import (
     AuditLog,
@@ -124,6 +125,7 @@ async def get_dashboard_stats(
         .where(HiTLThreadModel.status.in_(["OPEN", "IN_PROGRESS"]))
     )
     hitl_open = hitl_result.scalar() or 0
+    observe_queue_depth(tenant_id=tenant_id, status="open", depth=int(hitl_open))
 
     # -- KPI: automation rate --
     all_items_result = await db.execute(
@@ -136,6 +138,7 @@ async def get_dashboard_stats(
         automation_rate = round(non_blocked / len(all_item_states) * 100, 1)
     else:
         automation_rate = 78.5
+    set_automation_rate(tenant_id=tenant_id, rate_percent=automation_rate)
 
     # -- KPI: today spend --
     spend_result = await db.execute(

@@ -5,12 +5,15 @@ from fastapi import APIRouter
 
 from labelforge.api.v1 import (
     admin,
+    agents,
+    analytics,
     artifacts,
     audit_log,
     auth,
     budgets,
     dashboard,
     documents,
+    evals,
     hitl,
     importers,
     item_artifacts,
@@ -45,6 +48,9 @@ api_router.include_router(notifications.router)
 api_router.include_router(notifications.users_router)
 api_router.include_router(settings.router)
 api_router.include_router(warning_labels.router)
+api_router.include_router(agents.router)
+api_router.include_router(evals.router)
+api_router.include_router(analytics.router)
 
 
 @api_router.get("/ping")
