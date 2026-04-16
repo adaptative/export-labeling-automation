@@ -277,14 +277,58 @@ async def fuse_data_activity(input: ActivityInput) -> ActivityOutput:
 
 @activity.defn
 async def compliance_eval_activity(input: ActivityInput) -> ActivityOutput:
-    """Evaluate compliance rules against fused item data."""
+    """Evaluate compliance rules against fused item data via the ComplianceClassifierAgent."""
     activity.logger.info("Running compliance evaluation for item %s", input.item_id)
-    return ActivityOutput(
-        success=True,
-        item_id=input.item_id,
-        new_state=ItemState.COMPLIANCE_EVAL.value,
-        data=input.payload,
-    )
+
+    fused_items = input.payload.get("fused_items") or []
+    if not fused_items:
+        return ActivityOutput(
+            success=True,
+            item_id=input.item_id,
+            new_state=ItemState.COMPLIANCE_EVAL.value,
+            data=input.payload,
+        )
+
+    try:
+        from labelforge.agents.compliance_classifier import ComplianceClassifierAgent
+
+        # Rules may arrive in the payload (test/synchronous paths) or need to be
+        # loaded from the DB for the tenant.
+        rules = list(input.payload.get("rules") or [])
+        if not rules:
+            rules = await _load_active_rules_for_tenant(input.tenant_id)
+
+        agent = ComplianceClassifierAgent()
+        result = await agent.execute({
+            "fused_items": fused_items,
+            "rules": rules,
+            "default_destination": input.payload.get("default_destination", "US"),
+        })
+
+        output_data = {
+            **input.payload,
+            "compliance_reports": result.data.get("reports", []),
+            "applicable_warnings": result.data.get("warnings", {}),
+            "compliance_needs_hitl_items": result.data.get("needs_hitl_items", []),
+        }
+        return ActivityOutput(
+            success=result.success,
+            item_id=input.item_id,
+            new_state=ItemState.COMPLIANCE_EVAL.value,
+            data=output_data,
+            needs_hitl=result.needs_hitl,
+            hitl_reason=result.hitl_reason,
+            cost_usd=result.cost,
+        )
+
+    except Exception as exc:
+        activity.logger.error("Compliance eval failed for item %s: %s", input.item_id, exc)
+        return ActivityOutput(
+            success=False,
+            item_id=input.item_id,
+            new_state=ItemState.FAILED.value,
+            data={**input.payload, "error": str(exc)},
+        )
 
 
 @activity.defn
@@ -301,26 +345,209 @@ async def generate_drawing_activity(input: ActivityInput) -> ActivityOutput:
 
 @activity.defn
 async def compose_label_activity(input: ActivityInput) -> ActivityOutput:
-    """Compose final label layout from die-cut + compliance data."""
+    """Compose the die-cut SVG via the ComposerAgent.
+
+    Produces one die-cut artifact per fused item. Resulting SVGs, placements
+    and provenance records are accumulated on the payload under
+    ``composed_artifacts`` keyed by item_no.
+    """
     activity.logger.info("Composing label for item %s", input.item_id)
-    return ActivityOutput(
-        success=True,
-        item_id=input.item_id,
-        new_state=ItemState.COMPOSED.value,
-        data=input.payload,
-    )
+
+    fused_items = input.payload.get("fused_items") or []
+    if not fused_items:
+        return ActivityOutput(
+            success=True,
+            item_id=input.item_id,
+            new_state=ItemState.COMPOSED.value,
+            data=input.payload,
+        )
+
+    try:
+        from labelforge.agents.composer import ComposerAgent
+
+        importer_profile = input.payload.get("importer_profile") or {}
+        reports_by_item = {
+            r.get("item_no"): r for r in (input.payload.get("compliance_reports") or [])
+        }
+        drawings_by_item = input.payload.get("line_drawings_svg") or {}
+
+        agent = ComposerAgent()
+        artifacts: dict[str, dict] = {}
+        total_cost = 0.0
+        any_hitl = False
+        hitl_reasons: list[str] = []
+
+        for item in fused_items:
+            item_no = str(item.get("item_no") or "UNKNOWN")
+            report = reports_by_item.get(item_no) or {
+                "item_no": item_no, "verdicts": [],
+                "applicable_warnings": [], "passed": True,
+            }
+            drawing = drawings_by_item.get(item_no)
+            result = await agent.execute({
+                "fused_item": item,
+                "importer_profile": importer_profile,
+                "compliance_report": report,
+                "line_drawing_svg": drawing,
+            })
+            total_cost += result.cost or 0.0
+            if result.needs_hitl:
+                any_hitl = True
+                if result.hitl_reason:
+                    hitl_reasons.append(f"{item_no}: {result.hitl_reason}")
+            artifacts[item_no] = {
+                "die_cut_svg": result.data.get("die_cut_svg", ""),
+                "placements": result.data.get("placements", []),
+                "provenance": result.data.get("provenance", {}),
+            }
+
+        output_data = {
+            **input.payload,
+            "composed_artifacts": artifacts,
+        }
+        return ActivityOutput(
+            success=not any_hitl,
+            item_id=input.item_id,
+            new_state=ItemState.COMPOSED.value,
+            data=output_data,
+            needs_hitl=any_hitl,
+            hitl_reason="; ".join(hitl_reasons) if hitl_reasons else None,
+            cost_usd=total_cost,
+        )
+
+    except Exception as exc:
+        activity.logger.error("Compose failed for item %s: %s", input.item_id, exc)
+        return ActivityOutput(
+            success=False,
+            item_id=input.item_id,
+            new_state=ItemState.FAILED.value,
+            data={**input.payload, "error": str(exc)},
+        )
 
 
 @activity.defn
 async def validate_output_activity(input: ActivityInput) -> ActivityOutput:
-    """Validate composed output (barcode scannable, dims match, etc.)."""
+    """Validate composed output (barcode scannable, dims match, etc.) via ValidatorAgent."""
     activity.logger.info("Validating output for item %s", input.item_id)
-    return ActivityOutput(
-        success=True,
-        item_id=input.item_id,
-        new_state=ItemState.VALIDATED.value,
-        data=input.payload,
-    )
+
+    fused_items = input.payload.get("fused_items") or []
+    artifacts = input.payload.get("composed_artifacts") or {}
+    if not fused_items or not artifacts:
+        return ActivityOutput(
+            success=True,
+            item_id=input.item_id,
+            new_state=ItemState.VALIDATED.value,
+            data=input.payload,
+        )
+
+    try:
+        from labelforge.agents.validator import ValidatorAgent
+
+        importer_profile = input.payload.get("importer_profile") or {}
+        required_fields = _required_fields_from_profile(importer_profile)
+        expected_dims = input.payload.get("expected_dimensions_mm") or {}
+
+        agent = ValidatorAgent()
+        reports: dict[str, dict] = {}
+        critical_total = 0
+        any_hitl = False
+        hitl_reasons: list[str] = []
+
+        for item in fused_items:
+            item_no = str(item.get("item_no") or "UNKNOWN")
+            artifact = artifacts.get(item_no) or {}
+            svg = artifact.get("die_cut_svg", "")
+            placements = artifact.get("placements", [])
+            result = await agent.execute({
+                "die_cut_svg": svg,
+                "fused_item": item,
+                "required_fields": required_fields,
+                "expected_dimensions_mm": expected_dims,
+                "placements": placements,
+            })
+            reports[item_no] = result.data.get("validation_report", {})
+            critical_total += result.data.get("critical_count", 0)
+            if result.needs_hitl:
+                any_hitl = True
+                if result.hitl_reason:
+                    hitl_reasons.append(f"{item_no}: {result.hitl_reason}")
+
+        output_data = {
+            **input.payload,
+            "validation_reports": reports,
+            "validation_critical_count": critical_total,
+        }
+        return ActivityOutput(
+            success=not any_hitl,
+            item_id=input.item_id,
+            new_state=(
+                ItemState.VALIDATED.value if not any_hitl else ItemState.COMPOSED.value
+            ),
+            data=output_data,
+            needs_hitl=any_hitl,
+            hitl_reason="; ".join(hitl_reasons) if hitl_reasons else None,
+        )
+
+    except Exception as exc:
+        activity.logger.error("Validate failed for item %s: %s", input.item_id, exc)
+        return ActivityOutput(
+            success=False,
+            item_id=input.item_id,
+            new_state=ItemState.FAILED.value,
+            data={**input.payload, "error": str(exc)},
+        )
+
+
+# ── Activity helpers ───────────────────────────────────────────────────────
+
+
+async def _load_active_rules_for_tenant(tenant_id: str) -> list[dict]:
+    """Fetch active compliance rules for a tenant as raw dicts.
+
+    Returns an empty list on any DB / connection issue — the agent treats
+    an empty rule set as profile drift and escalates to HiTL on its own,
+    so we never want this helper to raise into the workflow.
+    """
+    try:
+        from sqlalchemy import select
+        from labelforge.db.models import ComplianceRule
+        from labelforge.db.session import async_session_factory
+
+        async with async_session_factory() as session:
+            stmt = select(ComplianceRule).where(
+                ComplianceRule.tenant_id == tenant_id,
+                ComplianceRule.is_active == True,  # noqa: E712
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            return [
+                {
+                    "code": r.rule_code,
+                    "version": r.version,
+                    "title": r.title,
+                    "country": r.region,
+                    "placement": r.placement,
+                    "logic": r.logic or {},
+                }
+                for r in rows
+            ]
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not load rules for tenant %s: %s", tenant_id, exc)
+        return []
+
+
+def _required_fields_from_profile(profile: dict) -> list[str]:
+    """Extract the union of field names declared in a profile's panel_layouts."""
+    layouts = profile.get("panel_layouts") or {}
+    required: set[str] = set()
+    if isinstance(layouts, dict):
+        for panel, spec in layouts.items():
+            if isinstance(spec, list):
+                required.update(str(f) for f in spec)
+            elif isinstance(spec, dict):
+                if spec.get("selected") is False:
+                    continue
+                required.update(str(f) for f in spec.get("fields", []))
+    return sorted(required)
 
 
 @activity.defn
