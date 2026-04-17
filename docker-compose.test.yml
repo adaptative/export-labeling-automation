@@ -1,0 +1,65 @@
+# Compose stack for E2E Playwright runs (INT-024 · Sprint-17).
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up --build
+#   PLAYWRIGHT_LIVE_BACKEND=1 PLAYWRIGHT_TEST_URL=http://localhost:4173 \
+#     npm --prefix frontend run test:e2e
+#
+# The stack intentionally uses in-memory defaults where possible so that
+# container boot is <30s. Postgres is seeded with the canonical
+# Nakoda/Acme fixture set via the API's ``seed_if_empty`` call on start-up.
+version: "3.9"
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: labelforge
+      POSTGRES_PASSWORD: labelforge
+      POSTGRES_DB: labelforge_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labelforge -d labelforge_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  redis-test:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  api-test:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://labelforge:labelforge@postgres-test:5432/labelforge_test
+      REDIS_URL: redis://redis-test:6379/0
+      LABELFORGE_ENV: test
+      LOG_LEVEL: warning
+      # Disable OTEL exporter in tests — the SDK still records spans locally.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+    command: >
+      bash -lc "
+        python -c 'from labelforge.db.session import create_all_tables; import asyncio; asyncio.run(create_all_tables())' &&
+        python -c 'from labelforge.db.seed import seed_if_empty; import asyncio; asyncio.run(seed_if_empty())' &&
+        uvicorn labelforge.app:app --host 0.0.0.0 --port 8000
+      "
+
+  frontend-test:
+    build:
+      context: ./frontend
+    environment:
+      VITE_API_BASE_URL: http://localhost:8001/api/v1
+    depends_on:
+      - api-test
+    ports:
+      - "4173:80"
