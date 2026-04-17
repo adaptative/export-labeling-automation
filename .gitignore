@@ -40,3 +40,10 @@ credentials.json
 .env.*.local
 labelforge.db
 .blob_storage/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/npm-debug.log*
+frontend/coverage/
