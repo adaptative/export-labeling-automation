@@ -60,7 +60,13 @@ logger = logging.getLogger(__name__)
 # Hard cap on agent replies per thread. A normal block-resolution
 # conversation is 2-4 turns; 10 leaves plenty of head-room while
 # preventing a runaway handler.
-MAX_AGENT_TURNS: int = 10
+# Hard cap on substantive agent replies per thread. Counts only the
+# *final* messages a handler produces — interim tool-loop status
+# messages (``context.intermediate=True``) are excluded so the progress
+# pings shipped in #176 don't halve this budget. At 30 this comfortably
+# covers the longest real triage conversations while still stopping
+# runaway LLM loops.
+MAX_AGENT_TURNS: int = 30
 
 
 # Per-thread async locks, lazily created. asyncio.Lock is the right
@@ -914,7 +920,23 @@ async def _reload_thread(
 
 
 def _count_agent_turns(ctx: ChatContext) -> int:
-    return sum(1 for m in ctx.messages if m.role == "agent")
+    """Count *substantive* agent replies on the thread.
+
+    Intermediate progress messages posted during a tool-use round
+    (flagged via ``context.intermediate=True``) are deliberately not
+    counted — they're UX feedback, not independent agent turns, and
+    including them would halve the effective :data:`MAX_AGENT_TURNS`
+    budget since every real round now produces (interim, final).
+    """
+    count = 0
+    for m in ctx.messages:
+        if m.role != "agent":
+            continue
+        ctx_meta = m.context or {}
+        if isinstance(ctx_meta, Mapping) and ctx_meta.get("intermediate"):
+            continue
+        count += 1
+    return count
 
 
 # ── Item-data patching ──────────────────────────────────────────────────────
@@ -1048,6 +1070,11 @@ async def _post_system_message(
     )
     db.add(msg)
     await db.commit()
+    # ``created_at`` is server-default — refresh so the value lands on
+    # the instance before we broadcast. Without this, the WS payload
+    # carried ``created_at=null`` and the live UI rendered "Invalid
+    # Date" on the bubble.
+    await db.refresh(msg)
 
     # Still broadcast so the live UI sees it.
     from labelforge.services.hitl.router import (
@@ -1065,6 +1092,11 @@ async def _post_system_message(
                 "sender_type": "system",
                 "content": content,
                 "context": dict(context) if context else None,
+                "created_at": (
+                    msg.created_at.isoformat()
+                    if msg.created_at is not None
+                    else None
+                ),
             },
         ),
     )
