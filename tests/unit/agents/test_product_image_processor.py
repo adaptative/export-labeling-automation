@@ -57,25 +57,36 @@ class TestPreprocess:
 
 
 class TestVectorize:
-    def test_returns_valid_svg(self):
+    """New-format vectorizer embeds the preprocessed bitmap as a base64
+    PNG inside an ``<image>`` tag. The previous grid-of-rects mosaic
+    was swapped out because it flattened small features into illegible
+    blobs (e.g. text fragments extracted from PDFs looked like Lego
+    bricks). The new format preserves product-photo fidelity at the
+    cost of not being a true vectorisation — but for die-cut preview
+    this is the right trade-off."""
+
+    def test_returns_valid_svg_with_embedded_image(self):
         bmp = preprocess_image(_png_bytes())
         svg = vectorize_to_svg(bmp)
         assert svg.startswith("<svg")
         assert svg.endswith("</svg>")
         assert 'xmlns="http://www.w3.org/2000/svg"' in svg
-        assert "<rect" in svg
+        assert "<image" in svg
+        assert "data:image/png;base64," in svg
 
-    def test_empty_image_produces_empty_svg(self):
+    def test_empty_input_still_produces_valid_svg(self):
         bmp = preprocess_image(_png_bytes(ink_box=None))
         svg = vectorize_to_svg(bmp)
+        # Well-formed SVG header + self-closing tags.
         assert svg.startswith("<svg")
-        assert "<rect" not in svg
+        assert svg.endswith("</svg>")
 
-    def test_grid_limits_rect_count(self):
-        bmp = preprocess_image(_png_bytes((400, 400), ink_box=(0, 0, 400, 400)))
-        svg = vectorize_to_svg(bmp, grid=16)
-        # At most 16x16=256 rects regardless of source resolution.
-        assert svg.count("<rect") <= 256
+    def test_svg_bounded_by_embed_max_edge(self):
+        bmp = preprocess_image(_png_bytes((2000, 2000), ink_box=(0, 0, 2000, 2000)))
+        svg = vectorize_to_svg(bmp)
+        # Base64-encoded 512px PNG of near-uniform ink fits well under
+        # ~50KB — proves the downscale actually happens.
+        assert len(svg) < 100_000
 
 
 class TestScoreConfidence:
