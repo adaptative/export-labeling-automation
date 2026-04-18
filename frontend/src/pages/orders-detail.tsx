@@ -256,8 +256,16 @@ export default function OrderDetail() {
       ]);
       setOrder(orderData);
       setDocuments(docsData.documents);
-      // Filter threads by order_id (backend may not filter by order)
-      const orderThreads = hitlData.threads.filter(t => t.order_id === orderId);
+      // Filter threads by order_id AND hide terminal statuses — the
+      // "Issues" tab is a blocker inbox, not an audit log. Leaving
+      // RESOLVED / CANCELLED / ESCALATED_RESOLVED threads in the list
+      // is what made users think resolving didn't "do anything" — they
+      // clicked Resolve, the row flipped status but stayed on screen,
+      // and the count next to "Issues (N)" never dropped.
+      const TERMINAL_STATUSES = new Set(['RESOLVED', 'CANCELLED']);
+      const orderThreads = hitlData.threads.filter(
+        t => t.order_id === orderId && !TERMINAL_STATUSES.has(t.status),
+      );
       setThreads(orderThreads);
       setActivities(auditData.entries);
       // Track when the pipeline last advanced so we can show a notice
