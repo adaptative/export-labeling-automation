@@ -152,6 +152,44 @@ function ThreadBubble({
   );
 }
 
+// ── Agent-typing indicator ─────────────────────────────────────────────────
+//
+// Mirrors the ThreadBubble agent-side layout so the "thinking" bubble
+// slots naturally into the message stream. We render three CSS-animated
+// dots rather than a spinner so the cue reads as "composing a reply" (a
+// human-style hint) rather than "loading a page".
+
+function AgentTypingBubble({ agentId }: { agentId: string }) {
+  return (
+    <div className="flex gap-2.5" role="status" aria-live="polite">
+      <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 bg-primary/10 text-primary">
+        <Bot className="w-3.5 h-3.5" />
+      </div>
+      <div className="max-w-[75%] space-y-1.5">
+        <div className="px-3.5 py-2.5 rounded-xl rounded-tl-sm bg-card border shadow-sm">
+          <span className="flex items-center gap-1 h-4" aria-label={`${agentId} is typing`}>
+            <span
+              className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce"
+              style={{ animationDelay: '0ms' }}
+            />
+            <span
+              className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce"
+              style={{ animationDelay: '150ms' }}
+            />
+            <span
+              className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce"
+              style={{ animationDelay: '300ms' }}
+            />
+          </span>
+        </div>
+        <div className="text-[10px] text-muted-foreground px-1">
+          {agentId} is thinking…
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────
 
 export default function Hitl() {
@@ -328,7 +366,7 @@ function ThreadDetail({
   const selectOption = useSelectOption(thread.id);
   const resolveThread = useResolveThread(thread.id);
   const escalateThread = useEscalateThread(thread.id);
-  const { connected, error: liveError, sendTyping } = useThreadLive(thread.id);
+  const { connected, error: liveError, sendTyping, agentTyping } = useThreadLive(thread.id);
 
   const [draft, setDraft] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -499,6 +537,9 @@ function ThreadDetail({
               onPickOption={handlePickOption}
             />
           ))}
+        {agentTyping && canInteract && (
+          <AgentTypingBubble agentId={thread.agent_id ?? 'Agent'} />
+        )}
         <div ref={chatEndRef} />
       </div>
 

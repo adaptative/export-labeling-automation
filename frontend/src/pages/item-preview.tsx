@@ -396,11 +396,12 @@ export default function ItemPreview() {
                       <MissingState reason={diecut.reason} label="die-cut SVG" />
                     )}
                   </div>
-                  {diecut?.kind === 'blob' && (
-                    <p className="text-[10px] text-muted-foreground mt-2 font-mono truncate">
-                      {diecut.contentHash ? `hash: ${diecut.contentHash}` : null}
-                    </p>
-                  )}
+                  {/*
+                    The content hash is useful for engineers triaging a
+                    misrender but confusing to the reviewers/buyers that
+                    live inside this pane — it's now surfaced only in the
+                    Artifacts tab and via the copy-link action.
+                  */}
                 </div>
               </TabsContent>
 

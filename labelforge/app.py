@@ -43,6 +43,17 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # pragma: no cover — defensive
         _log.warning("tracing.sqlalchemy_instrument_skipped", error=str(exc))
 
+    # Install the HITL auto-advance hook so chat handlers that signal
+    # ``resolved: true`` can push the order's pipeline forward without
+    # an operator click. Also pre-imports the chat-handler registry so
+    # the dispatcher can find a handler on the very first human reply.
+    try:
+        from labelforge.services.hitl.auto_advance import install as install_auto_advance
+        import labelforge.agents.chat_handlers  # noqa: F401 — registration side effect
+        install_auto_advance()
+    except Exception as exc:  # pragma: no cover — defensive
+        _log.warning("hitl.auto_advance_install_skipped", error=str(exc))
+
     # Wire Redis-backed LLM completion cache + HiTL MessageRouter. The
     # router falls back to in-memory when Redis is unavailable so tests
     # and single-worker dev work without extra setup.

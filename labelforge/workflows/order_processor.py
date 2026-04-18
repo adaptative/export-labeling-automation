@@ -536,9 +536,18 @@ async def _load_active_rules_for_tenant(tenant_id: str) -> list[dict]:
 
 
 def _required_fields_from_profile(profile: dict) -> list[str]:
-    """Extract the union of field names declared in a profile's panel_layouts."""
+    """Extract the union of field names declared in a profile's panel_layouts.
+
+    Baseline regulator-mandated fields (F13 from the DieCut Generation
+    Review) are always included even when the profile's panel_layouts are
+    empty — the Validator treats missing baseline fields as Critical and
+    the pipeline blocks the order on HUMAN_BLOCKED until resolved.
+    """
     layouts = profile.get("panel_layouts") or {}
-    required: set[str] = set()
+    required: set[str] = {
+        "item_no", "case_qty", "dimensions",
+        "country_of_origin", "barcode",
+    }
     if isinstance(layouts, dict):
         for panel, spec in layouts.items():
             if isinstance(spec, list):

@@ -31,6 +31,13 @@ from labelforge.services.hitl.resolver import (
     set_escalation_notifier,
     set_workflow_resumer,
 )
+from labelforge.services.hitl.chat_dispatcher import (
+    MAX_AGENT_TURNS,
+    dispatch_on_human_message,
+    get_auto_advance_hook,
+    schedule_dispatch,
+    set_auto_advance_hook,
+)
 
 __all__ = [
     "InMemoryMessageRouter",
@@ -46,4 +53,10 @@ __all__ = [
     "ThreadStatus",
     "set_escalation_notifier",
     "set_workflow_resumer",
+    # Chat dispatch
+    "MAX_AGENT_TURNS",
+    "dispatch_on_human_message",
+    "get_auto_advance_hook",
+    "schedule_dispatch",
+    "set_auto_advance_hook",
 ]
