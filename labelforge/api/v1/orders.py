@@ -1393,6 +1393,63 @@ async def _persist_approval_pdf_for_order(
         ))
 
 
+async def _rescue_resolved_items(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    order: Order,
+) -> int:
+    """Move HUMAN_BLOCKED items whose HiTL threads are all resolved
+    back to their ``last_successful_state``.
+
+    Rationale: a block fires when an activity returns ``needs_hitl``;
+    the advance endpoint flips the item to HUMAN_BLOCKED and opens a
+    thread. Once the operator resolves (or we escalate) every thread
+    linked to that item, the item is no longer blocked on anything —
+    but the state flag stays HUMAN_BLOCKED forever because the
+    ``_STAGE_PLAN`` loop only fires on active pipeline states.
+
+    This helper is the inverse of the block-writing path: it finds
+    every HUMAN_BLOCKED item on ``order``, checks the OPEN thread
+    count for ``(order_id, item_no)``, and if zero remain it resets
+    the item to ``last_successful_state`` (falling back to ``FUSED``
+    when the marker is missing for any reason). The block breadcrumbs
+    are stripped so the UI pipeline tracker stops painting the item
+    orange. Returns the number of items rescued.
+    """
+    from labelforge.db.models import HiTLThreadModel
+
+    blocked = [it for it in order.items if it.state == "HUMAN_BLOCKED"]
+    if not blocked:
+        return 0
+
+    rescued = 0
+    for item in blocked:
+        open_count = (await db.execute(
+            select(func.count(HiTLThreadModel.id)).where(
+                HiTLThreadModel.tenant_id == tenant_id,
+                HiTLThreadModel.order_id == order.id,
+                HiTLThreadModel.item_no == item.item_no,
+                HiTLThreadModel.status == "OPEN",
+            )
+        )).scalar_one()
+        if open_count:
+            continue
+
+        data = dict(item.data or {})
+        resume_state = str(data.get("last_successful_state") or "FUSED")
+        data.pop("blocked_at_stage", None)
+        data.pop("blocked_reason", None)
+        item.data = data
+        item.state = resume_state
+        item.state_changed_at = datetime.now(tz=timezone.utc)
+        rescued += 1
+
+    if rescued:
+        await db.flush()
+    return rescued
+
+
 _STAGE_PLAN: list[tuple[str, str, str]] = [
     ("FUSED",             "COMPLIANCE_EVAL",  "compliance_eval_activity"),
     ("COMPLIANCE_EVAL",   "DRAWING_GENERATED", "generate_drawing_activity"),
@@ -1440,10 +1497,34 @@ async def advance_order_pipeline(
     ran_steps: list[AdvanceStep] = []
     stalled_reason: Optional[str] = None
 
+    # Self-heal: rescue items that are sitting in HUMAN_BLOCKED when all
+    # of their linked HiTL threads have been resolved. The per-item
+    # ``blocked_at_stage`` + ``last_successful_state`` breadcrumbs the
+    # pipeline leaves behind tell us exactly where to resume from. This
+    # is the fix for the "order stays Human Blocked even after I
+    # resolved all threads" complaint — the resolver's auto-advance
+    # hook calls this endpoint, and now that call actually moves the
+    # needle instead of no-op-ing because every item sits outside the
+    # ``_STAGE_PLAN`` from-state set.
+    unblocked = await _rescue_resolved_items(
+        db,
+        tenant_id=_user.tenant_id,
+        order=order,
+    )
+
     # Load the importer profile once — Compose & Validate both need it.
     importer_profile_payload = await _load_importer_profile_payload(
         db, order.importer_id, _user.tenant_id,
     )
+
+    if unblocked:
+        ran_steps.append(AdvanceStep(
+            stage="UNBLOCKED",
+            items_advanced=unblocked,
+            needs_hitl=0,
+            failed=0,
+            cost_usd=0.0,
+        ))
 
     for from_state, to_state, activity_name in _STAGE_PLAN:
         candidates = [it for it in order.items if it.state == from_state]
