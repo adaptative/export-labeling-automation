@@ -463,13 +463,18 @@ class TestDispatcherSafetyRails:
     async def test_turn_cap_posts_system_message(
         self, seeded, router, registry,
     ):
+        """Runaway-loop protection: after the counter semantic was fixed
+        to "agents since latest human" in #179, the cap trips only when
+        MAX_AGENT_TURNS agents have accumulated WITHOUT a subsequent
+        human turn — which is the real runaway-loop signature. We seed
+        that shape explicitly (one human, then MAX_AGENT_TURNS agents,
+        no closing human) so the pre-dispatch counter walks back past
+        all N agents before hitting the human."""
         handler = _FakeHandler(ChatReply(text="should not fire"))
         register_chat_handler(handler)
-        # Seed MAX_AGENT_TURNS agent messages so the next turn exceeds the cap.
-        extra = []
+        extra = [{"sender_type": "human", "content": "kick off"}]
         for i in range(MAX_AGENT_TURNS):
             extra.append({"sender_type": "agent", "content": f"turn {i}"})
-        extra.append({"sender_type": "human", "content": "still stuck?"})
         thread_id = await _open_thread(
             seeded["factory"],
             order_id=seeded["order_id"],
@@ -483,6 +488,36 @@ class TestDispatcherSafetyRails:
         msgs = await _fetch_messages(seeded["factory"], thread_id)
         cap_msg = next(m for m in msgs if m.sender_type == "system")
         assert cap_msg.context.get("action") == "chat_turn_cap"
+
+    @pytest.mark.asyncio
+    async def test_fresh_human_turn_resets_the_cap(
+        self, seeded, router, registry,
+    ):
+        """The all-time counter was hanging a long productive thread
+        permanently at the cap even after a fresh human turn arrived.
+        Regression test for the complaint in #179: seed
+        MAX_AGENT_TURNS historical agents (before the latest human) +
+        a new human on top; handler must still be invoked."""
+        handler = _FakeHandler(ChatReply(text="Sure, here's the data."))
+        register_chat_handler(handler)
+        extra = [{"sender_type": "human", "content": "kicked off long ago"}]
+        for i in range(MAX_AGENT_TURNS * 2):
+            extra.append({"sender_type": "agent", "content": f"historical {i}"})
+        # The fresh human turn that triggered this dispatch is posted
+        # at the very end — it resets the "agents since latest human"
+        # budget back to zero.
+        extra.append({"sender_type": "human", "content": "new question"})
+        thread_id = await _open_thread(
+            seeded["factory"],
+            order_id=seeded["order_id"],
+            item_no=seeded["item_no"],
+            extra_messages=extra,
+        )
+        reply = await dispatch_on_human_message(thread_id, "t1")
+        assert reply is not None
+        assert handler.calls, (
+            "cap wrongly tripped on a thread with a fresh human turn"
+        )
 
     @pytest.mark.asyncio
     async def test_cross_tenant_dispatch_is_noop(
@@ -950,29 +985,23 @@ class TestDispatcherTurnCapCounting:
     async def test_intermediate_agent_messages_do_not_count_toward_cap(
         self, seeded, router, registry,
     ):
-        """Seed MAX_AGENT_TURNS intermediate agent messages and one real
-        final agent reply — the cap should NOT trip. Interim status
-        messages from tool rounds (``context.intermediate=True``) are
-        UX feedback, not independent agent turns."""
+        """Runaway-loop scenario — many interim-flagged agent messages
+        after a human, with no closing human turn. The counter must
+        ignore the interim flag AND still let the handler fire because
+        only interims sit between the human and 'now'."""
         handler = _FakeHandler(ChatReply(text="Still responsive."))
         register_chat_handler(handler)
 
-        extra = []
-        # Many interim-flagged agent messages — should be ignored by the
-        # turn counter.
+        extra = [{"sender_type": "human", "content": "run the thing"}]
+        # Many interim-flagged agent messages after the human — these
+        # should be ignored by the turn counter so the cap doesn't
+        # trip spuriously on a tool-heavy exchange.
         for i in range(MAX_AGENT_TURNS + 5):
             extra.append({
                 "sender_type": "agent",
                 "content": f"interim {i}",
                 "context": {"intermediate": True, "round": 1},
             })
-        # Exactly one *real* agent reply.
-        extra.append({
-            "sender_type": "agent",
-            "content": "previous real reply",
-        })
-        extra.append({"sender_type": "human", "content": "keep going"})
-
         thread_id = await _open_thread(
             seeded["factory"],
             order_id=seeded["order_id"],
@@ -981,22 +1010,22 @@ class TestDispatcherTurnCapCounting:
         )
         reply = await dispatch_on_human_message(thread_id, "t1")
         assert reply is not None
-        # Handler invoked (cap NOT tripped).
+        # Handler invoked (cap NOT tripped by interim pings).
         assert handler.calls, "handler should have been called"
 
     @pytest.mark.asyncio
     async def test_substantive_agent_messages_still_count(
         self, seeded, router, registry,
     ):
-        """Sanity — non-intermediate replies still count, so the runaway
-        protection isn't defeated."""
+        """Sanity — the "since latest human" counter still trips when
+        MAX_AGENT_TURNS real agent messages accumulate between the
+        latest human turn and the next dispatch. Runaway protection
+        remains intact."""
         handler = _FakeHandler(ChatReply(text="should not fire"))
         register_chat_handler(handler)
-        extra = [
-            {"sender_type": "agent", "content": f"real {i}"}
-            for i in range(MAX_AGENT_TURNS)
-        ]
-        extra.append({"sender_type": "human", "content": "still stuck?"})
+        extra = [{"sender_type": "human", "content": "go"}]
+        for i in range(MAX_AGENT_TURNS):
+            extra.append({"sender_type": "agent", "content": f"real {i}"})
         thread_id = await _open_thread(
             seeded["factory"],
             order_id=seeded["order_id"],

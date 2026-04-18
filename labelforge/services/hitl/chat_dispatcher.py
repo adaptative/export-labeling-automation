@@ -920,16 +920,34 @@ async def _reload_thread(
 
 
 def _count_agent_turns(ctx: ChatContext) -> int:
-    """Count *substantive* agent replies on the thread.
+    """Count *substantive* agent replies since the latest human turn.
 
-    Intermediate progress messages posted during a tool-use round
-    (flagged via ``context.intermediate=True``) are deliberately not
-    counted — they're UX feedback, not independent agent turns, and
-    including them would halve the effective :data:`MAX_AGENT_TURNS`
-    budget since every real round now produces (interim, final).
+    The cap exists to stop a single human prompt from triggering a
+    runaway agent loop — it is NOT a total-thread-length budget. A
+    thread that's had 40 productive turns over months still has a
+    budget of :data:`MAX_AGENT_TURNS` for the next human prompt.
+
+    Semantics:
+    - Count agent replies that appear AFTER the latest human message.
+      Before a human ever spoke on this thread we count from the start
+      so the cap still bounds pure automation sequences.
+    - Intermediate progress messages posted during a tool-use round
+      (``context.intermediate=True``) are not counted — they're UX
+      feedback, not independent agent turns.
+
+    This is the fix for the "bot stops taking instructions after a
+    while" complaint (#177 + #179): under the old all-time counter, a
+    thread with >= :data:`MAX_AGENT_TURNS` historical agent messages
+    would be permanently stuck at the cap even after a fresh human
+    turn arrived.
     """
+    # Walk the history backwards, start counting when we've passed the
+    # most recent human message. Messages are already ordered oldest
+    # first by _build_chat_context.
     count = 0
-    for m in ctx.messages:
+    for m in reversed(ctx.messages):
+        if m.role == "human":
+            break
         if m.role != "agent":
             continue
         ctx_meta = m.context or {}
