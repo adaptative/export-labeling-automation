@@ -560,7 +560,12 @@ export default function OrderDetail() {
                   onClick={async () => {
                     setMutating(true);
                     try {
-                      const res = await apiPost<{ ran_steps: Array<{ stage: string; items_advanced: number; needs_hitl: number; failed: number }>; stalled_reason?: string | null }>(`/orders/${orderId}/advance`);
+                      // force=true: operator explicitly asked to retry — run the
+                      // full _STAGE_PLAN cascade after rescue. The auto-advance
+                      // hook that fires on HiTL Resolve uses the default
+                      // (force=false) so it only rescues, never auto-re-
+                      // validates (which would just re-spawn the same thread).
+                      const res = await apiPost<{ ran_steps: Array<{ stage: string; items_advanced: number; needs_hitl: number; failed: number }>; stalled_reason?: string | null }>(`/orders/${orderId}/advance?force=true`);
                       const summary = res.ran_steps
                         .map(s => `${s.stage} +${s.items_advanced}${s.needs_hitl ? ` (${s.needs_hitl} HITL)` : ''}`)
                         .join(' · ') || 'no stage to run';
