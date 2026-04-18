@@ -604,10 +604,15 @@ class TestDispatcherToolLoop:
     async def test_tool_call_executes_and_final_reply_persists(
         self, seeded, router, registry,
     ):
-        """Turn 1 returns a `tools` request, turn 2 returns prose. The
-        dispatcher must run the tool, append its result as a system
-        message, and persist only the final turn's prose as the agent
-        message (turn-1 text is never stored)."""
+        """Turn 1 emits a non-substantive marker AND a ``tools`` array;
+        turn 2 emits the final prose. The dispatcher must run the tool,
+        append its result as a system message, and persist the final
+        prose as the agent message.
+
+        The turn-1 placeholder text here is deliberately short so
+        ``_is_substantive`` rejects it — if the LLM had said something
+        meaningful alongside its tool call we'd persist that separately
+        (see :class:`TestDispatcherInterimStatus`)."""
         # Seed one ImporterDocument so list_importer_documents has
         # something to return.
         factory = seeded["factory"]
@@ -631,9 +636,11 @@ class TestDispatcherToolLoop:
             await s.commit()
 
         handler = _ScriptedHandler([
-            # Turn 1 — "let me look up the docs first"
+            # Turn 1 — non-substantive marker (< 8 chars so the interim
+            # persister skips it). Exercises the "pure tool call, no
+            # user-facing prose" path.
             ChatReply(
-                text="(thinking — tool call follows)",
+                text="...",
                 tool_calls=[{"name": "list_importer_documents", "args": {}}],
             ),
             # Turn 2 — final visible answer after the tool result arrives
@@ -662,14 +669,15 @@ class TestDispatcherToolLoop:
         assert len(tool_msgs) == 1
         assert "idoc-test-001" in tool_msgs[0].content
 
-        # Only the final reply persisted — intermediate "(thinking …)"
-        # text must NOT be stored on the thread.
+        # Only the final reply persisted — the non-substantive "..."
+        # placeholder must NOT be stored on the thread.
         msgs = await _fetch_messages(factory, thread_id)
         agent_msgs = [m for m in msgs if m.sender_type == "agent"]
-        # Opener + one dispatcher reply == 2; never 3 (intermediate not persisted).
+        # Opener + one dispatcher reply == 2; no interim (turn-1 text
+        # was too short to qualify as substantive).
         assert len(agent_msgs) == 2
         assert "idoc-test-001" in agent_msgs[-1].content
-        assert "(thinking" not in agent_msgs[-1].content
+        assert agent_msgs[-1].content.count("...") == 0
 
     @pytest.mark.asyncio
     async def test_tool_loop_caps_at_three_rounds(
@@ -805,3 +813,130 @@ class TestDispatcherStaticContext:
         assert "SIB" in sibling_nos
         # The current item must NOT appear in siblings.
         assert seeded["item_no"] not in sibling_nos
+
+
+# ── Interim status + vacuous-reply rewrite (bot-goes-to-sleep fix) ────────
+
+
+class TestDispatcherInterimStatus:
+    @pytest.mark.asyncio
+    async def test_prose_with_tool_call_persists_as_intermediate_message(
+        self, seeded, router, registry,
+    ):
+        """When turn 1 emits BOTH visible prose and a tools array, the
+        prose is persisted as an agent message with
+        ``context={"intermediate": True, ...}`` so the operator sees
+        progress instead of silence while the tool runs + turn 2 cooks."""
+        handler = _ScriptedHandler([
+            ChatReply(
+                text="Sure — let me pull the compliance rules for this tenant first.",
+                tool_calls=[{"name": "list_compliance_rules", "args": {}}],
+            ),
+            ChatReply(
+                text="Found 0 rules. Looks like the tenant's rule table is empty.",
+            ),
+        ])
+        register_chat_handler(handler)
+
+        thread_id = await _open_thread(
+            seeded["factory"],
+            order_id=seeded["order_id"],
+            item_no=seeded["item_no"],
+            agent_id="scripted",
+            extra_messages=[{"sender_type": "human", "content": "list rules please"}],
+        )
+
+        await dispatch_on_human_message(thread_id, "t1")
+
+        msgs = await _fetch_messages(seeded["factory"], thread_id)
+        agent_msgs = [m for m in msgs if m.sender_type == "agent"]
+        # Opener + interim + final = 3.
+        assert len(agent_msgs) == 3
+        interim = agent_msgs[1]
+        assert "compliance rules" in interim.content.lower()
+        assert interim.context and interim.context.get("intermediate") is True
+        assert interim.context.get("tools_pending") == ["list_compliance_rules"]
+        # Final message is still the substantive answer.
+        assert "Found 0 rules" in agent_msgs[-1].content
+        # And the final message is NOT flagged intermediate.
+        assert not (agent_msgs[-1].context or {}).get("intermediate")
+
+    @pytest.mark.asyncio
+    async def test_vacuous_final_reply_rewritten_to_tool_summary(
+        self, seeded, router, registry,
+    ):
+        """After a tool runs, if the LLM's final turn is an empty polite
+        ack, the dispatcher swaps in a bullet-list summary of what was
+        fetched so the user doesn't get stuck staring at "Got it."."""
+        factory = seeded["factory"]
+        async with factory() as s:
+            s.add(ComplianceRule(
+                id=str(uuid4()),
+                tenant_id="t1",
+                rule_code="R_SUMMARY_TEST",
+                title="summary test",
+                region="US",
+                placement="both",
+                logic={"always_pass": True},
+                is_active=True,
+            ))
+            await s.commit()
+
+        handler = _ScriptedHandler([
+            ChatReply(
+                text="",
+                tool_calls=[{"name": "list_compliance_rules", "args": {}}],
+            ),
+            ChatReply(text="Got it."),
+        ])
+        register_chat_handler(handler)
+
+        thread_id = await _open_thread(
+            factory,
+            order_id=seeded["order_id"],
+            item_no=seeded["item_no"],
+            agent_id="scripted",
+            extra_messages=[{"sender_type": "human", "content": "run the tool"}],
+        )
+        await dispatch_on_human_message(thread_id, "t1")
+
+        msgs = await _fetch_messages(factory, thread_id)
+        final_agent = [m for m in msgs if m.sender_type == "agent"][-1]
+        # The "Got it." vacuous reply was rewritten.
+        assert final_agent.content != "Got it."
+        assert "quick summary" in final_agent.content.lower()
+        assert "list_compliance_rules" in final_agent.content
+        assert "R_SUMMARY_TEST" in final_agent.content  # cited from results
+
+    @pytest.mark.asyncio
+    async def test_substantive_final_reply_not_rewritten(
+        self, seeded, router, registry,
+    ):
+        """If the LLM actually said something concrete, leave it alone —
+        the rewrite only rescues vacuous replies."""
+        handler = _ScriptedHandler([
+            ChatReply(
+                text="",
+                tool_calls=[{"name": "list_compliance_rules", "args": {}}],
+            ),
+            ChatReply(
+                text="I found one rule: R_KEEP_ME. It's always-pass for US "
+                     "and applies to all items — no further action needed.",
+            ),
+        ])
+        register_chat_handler(handler)
+
+        thread_id = await _open_thread(
+            seeded["factory"],
+            order_id=seeded["order_id"],
+            item_no=seeded["item_no"],
+            agent_id="scripted",
+            extra_messages=[{"sender_type": "human", "content": "run it"}],
+        )
+        await dispatch_on_human_message(thread_id, "t1")
+
+        msgs = await _fetch_messages(seeded["factory"], thread_id)
+        final_agent = [m for m in msgs if m.sender_type == "agent"][-1]
+        assert "R_KEEP_ME" in final_agent.content
+        # Not wrapped in the summary template.
+        assert "quick summary of what I pulled" not in final_agent.content.lower()

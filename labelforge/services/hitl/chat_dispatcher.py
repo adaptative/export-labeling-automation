@@ -237,7 +237,11 @@ async def _dispatch_locked(
     # thinking…" indicator while we wait for the completion.
     await _publish_typing(thread_id, state="start", agent_id=ctx.agent_id)
     try:
-        reply = await _respond_with_tools(handler, ctx, tenant_id=tenant_id)
+        reply = await _respond_with_tools(
+            handler, ctx,
+            tenant_id=tenant_id,
+            thread_id=thread_id,
+        )
     finally:
         await _publish_typing(thread_id, state="stop", agent_id=ctx.agent_id)
 
@@ -334,24 +338,38 @@ async def _respond_with_tools(
     ctx,      # ChatContext
     *,
     tenant_id: str,
+    thread_id: str,
 ):
     """Drive the LLM through up to ``_MAX_TOOL_ROUNDS`` tool-use rounds.
 
     Each round:
     - ask the handler for a reply against the current message history
-    - if it requested one or more tools, execute them, append synthetic
-      ``system`` messages with the results, and loop
+    - if it emits prose AND a tools array, persist the prose as an
+      interim agent message so the operator sees progress while we
+      wait on the next OpenAI round-trip — otherwise the UI appears
+      to "go to sleep" during the 5–30 s tool round-trip
+    - if it requested one or more tools, execute them, publish a
+      typing event naming each tool so live clients render a concrete
+      status, append synthetic ``system`` messages with the results,
+      and loop
     - if it did not, return the reply straight to the caller
 
-    The final :class:`ChatReply` is what gets persisted as the visible
-    agent message. Intermediate tool round-trips are invisible to the
-    operator — only the concluding answer lands on the thread.
+    Final ChatReply is what the caller persists as the canonical
+    visible agent message. Intermediate prose we post here is flagged
+    ``context={"intermediate": True, ...}`` so operators can filter it
+    out of analytics; the content is always non-empty because we only
+    persist when the LLM actually said something alongside its tool
+    request.
     """
-    from labelforge.agents.chat import ChatMessage
+    from labelforge.agents.chat import ChatMessage, ChatReply
     from labelforge.services.hitl.chat_tools import (
         ToolContext,
         resolve_importer_id_for_order,
         run_tool,
+    )
+    from labelforge.services.hitl.resolver import (
+        AddMessageRequest,
+        get_thread_resolver,
     )
 
     # Build the bound tool context ONCE — importer_id is looked up from
@@ -363,14 +381,69 @@ async def _respond_with_tools(
 
     # Local mutable copy of the history so tool-results are visible to
     # the next handler.respond() call. We never persist these synthetic
-    # messages to the DB — they only live for the duration of this turn.
+    # system messages to the DB — they only live for the duration of
+    # this turn.
     working_messages = list(ctx.messages)
+
+    # Cumulative transcript of tool invocations across the whole loop —
+    # used as a fallback summary if the final LLM reply comes back
+    # vacuous ("(no reply)" / empty / polite ack with no data).
+    all_tool_results: list[dict] = []
 
     for round_idx in range(_MAX_TOOL_ROUNDS):
         working_ctx = _replace_messages(ctx, working_messages)
         reply = await handler.respond(working_ctx)
         if not reply.has_tool_calls:
-            return reply
+            return _ensure_non_vacuous_reply(reply, all_tool_results)
+
+        # Surface any prose the LLM emitted alongside the tool call.
+        # Without this, "Let me look up the compliance rules…" gets
+        # dropped on the floor and the user sees silence while the
+        # tools run + next round cooks on OpenAI.
+        if _is_substantive(reply.text):
+            try:
+                async with _session_mod.async_session_factory() as db:
+                    await get_thread_resolver().add_message(
+                        db,
+                        AddMessageRequest(
+                            tenant_id=tenant_id,
+                            thread_id=thread_id,
+                            sender_type="agent",
+                            content=reply.text,
+                            context={
+                                "model": reply.model,
+                                "intermediate": True,
+                                "round": round_idx + 1,
+                                "tools_pending": [
+                                    tc.get("name") for tc in reply.tool_calls
+                                    if isinstance(tc, dict)
+                                ],
+                            },
+                            actor=ctx.agent_id,
+                        ),
+                    )
+            except Exception as exc:  # pragma: no cover — best-effort
+                logger.warning(
+                    "HITL chat: failed to post interim status for %s: %s",
+                    thread_id, exc,
+                )
+
+        # Announce each tool's execution over the live WS so connected
+        # clients can render "Running get_document_text…" instead of a
+        # generic bouncing-dots typing indicator.
+        for call in reply.tool_calls:
+            name = str(call.get("name") or "")
+            if not name:
+                continue
+            try:
+                await _publish_typing(
+                    thread_id,
+                    state="start",
+                    agent_id=ctx.agent_id,
+                    label=f"tool:{name}",
+                )
+            except Exception:  # pragma: no cover
+                pass
 
         tool_results: list[dict] = []
         async with _session_mod.async_session_factory() as db:
@@ -386,6 +459,8 @@ async def _respond_with_tools(
                 args = call.get("args") if isinstance(call.get("args"), dict) else {}
                 result = await run_tool(tool_ctx, name, args)
                 tool_results.append({"name": name, "args": args, "result": result})
+
+        all_tool_results.extend(tool_results)
 
         # Serialize each result into a system message the next turn can
         # read. We keep each result bounded so a poorly chosen tool call
@@ -412,7 +487,116 @@ async def _respond_with_tools(
     final = await handler.respond(working_ctx)
     # Clear tool_calls on the final reply so the caller doesn't loop again.
     final.tool_calls = []
-    return final
+    return _ensure_non_vacuous_reply(final, all_tool_results)
+
+
+# "Low-signal" replies the LLM sometimes emits after a tool call —
+# e.g. "Got it", "Let me know if you need anything else". When we see
+# one of these AND we have collected tool results, we'd rather synthesise
+# a concrete summary than let the user stare at a two-word ack.
+_VACUOUS_PATTERNS = (
+    "(no reply)",
+    "let me know",
+    "got it",
+    "certainly",
+    "of course",
+    "i'll",
+    "i will",
+    "working on it",
+    "sure thing",
+)
+
+
+def _is_substantive(text: str) -> bool:
+    """True when the text is long enough to carry real information."""
+    if not text:
+        return False
+    stripped = text.strip()
+    if len(stripped) < 8:
+        return False
+    if stripped == "(no reply)":
+        return False
+    return True
+
+
+def _reply_is_vacuous(text: str) -> bool:
+    """Detects replies that are polite filler — no data, no decision."""
+    if not _is_substantive(text):
+        return True
+    lowered = text.strip().lower()
+    if len(lowered) > 140:
+        # A long reply almost always carries real content.
+        return False
+    return any(p in lowered for p in _VACUOUS_PATTERNS)
+
+
+def _ensure_non_vacuous_reply(reply, tool_results: list[dict]):
+    """If the LLM's final reply would leave the user on silence after a
+    tool run, rewrite it into a concise summary of what we did.
+
+    We never overwrite substantive replies — only vacuous ones. The
+    summary references tool names + key fields from their results so
+    the operator can at least follow up concretely.
+    """
+    if not _reply_is_vacuous(reply.text):
+        return reply
+    if not tool_results:
+        # No tools executed AND the LLM said nothing useful — let the
+        # caller show the placeholder; it's better than making up
+        # data. Keep the original text so the existing "(no reply)"
+        # test + user-facing string are preserved.
+        return reply
+    reply.text = _summarise_tool_results(tool_results)
+    return reply
+
+
+def _summarise_tool_results(tool_results: list[dict]) -> str:
+    """Compact, operator-friendly summary of what the tools produced.
+
+    Optimised for "I ran these tools, here is a 1-line snapshot of each"
+    rather than a full data dump — the structured results are already
+    on the conversation for a follow-up turn if the operator wants more.
+    """
+    import json as _json
+    lines = ["Here's a quick summary of what I pulled:"]
+    for tr in tool_results[:6]:
+        name = tr.get("name") or "?"
+        result = tr.get("result")
+        snippet = _one_line_preview(result)
+        lines.append(f"- `{name}` → {snippet}")
+    if len(tool_results) > 6:
+        lines.append(f"- (+{len(tool_results) - 6} more tool calls)")
+    lines.append(
+        "Let me know which one you'd like me to expand or what to patch, "
+        "and I'll proceed."
+    )
+    return "\n".join(lines)
+
+
+def _one_line_preview(result) -> str:
+    import json as _json
+    try:
+        if isinstance(result, list):
+            if not result:
+                return "0 rows"
+            ident_keys = ("rule_code", "code", "id", "filename", "item_no", "name")
+            first = result[0] if isinstance(result[0], dict) else None
+            label = None
+            if first:
+                for k in ident_keys:
+                    if k in first:
+                        label = f"{k}={first[k]!r}"
+                        break
+            return f"{len(result)} row(s)" + (f" — first {label}" if label else "")
+        if isinstance(result, dict):
+            if "error" in result:
+                return f"error: {result['error']}"
+            keys = list(result.keys())[:6]
+            return f"dict with keys {keys}"
+        text = _json.dumps(result, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = repr(result)
+    return text[:160] + ("…" if len(text) > 160 else "")
 
 
 def _replace_messages(ctx, messages):
@@ -799,13 +983,17 @@ def _nested_set(d: Dict[str, Any], dotted_key: str, value: Any) -> None:
 
 
 async def _publish_typing(
-    thread_id: str, *, state: str, agent_id: str,
+    thread_id: str, *, state: str, agent_id: str, label: Optional[str] = None,
 ) -> None:
     """Publish a ``typing`` envelope so the live UI can render an indicator.
 
     ``state`` is one of ``"start"`` / ``"stop"`` — the frontend flips its
-    "agent is thinking…" bubble on/off accordingly. Failures are logged
-    and swallowed; a missing typing indicator shouldn't block the reply.
+    "agent is thinking…" bubble on/off accordingly. ``label`` (optional)
+    carries a concrete status tag like ``"tool:list_compliance_rules"``
+    so connected clients can render "Running list_compliance_rules…"
+    instead of the generic bouncing-dots indicator. Failures are
+    logged and swallowed; a missing typing indicator shouldn't block
+    the reply.
     """
     try:
         from labelforge.services.hitl.router import (
@@ -813,13 +1001,16 @@ async def _publish_typing(
             get_message_router,
             make_envelope,
         )
+        payload: Dict[str, Any] = {
+            "role": "agent",
+            "agent_id": agent_id,
+            "state": state,
+        }
+        if label:
+            payload["label"] = label
         await get_message_router().publish(
             thread_id,
-            make_envelope(
-                EventType.TYPING,
-                thread_id,
-                {"role": "agent", "agent_id": agent_id, "state": state},
-            ),
+            make_envelope(EventType.TYPING, thread_id, payload),
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug(
