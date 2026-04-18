@@ -121,6 +121,13 @@ class ProcessedImage:
 _MIN_PDF_IMAGE_WIDTH = 200
 _MIN_PDF_IMAGE_HEIGHT = 200
 
+# Reject banner-shaped images (company letterheads, section dividers).
+# Product photography on commercial POs is always within 1:3–3:1 of
+# square. Anything outside is overwhelmingly likely to be chrome, not
+# content. 3.0 threshold empirically catches "SAGEBROOK HOME" 7.49
+# letterhead and similar while keeping landscape product shots.
+_MAX_PDF_IMAGE_ASPECT = 3.0
+
 
 def extract_images_from_pdf(data: bytes) -> list[tuple[str, bytes]]:
     """Return ``[(image_ref, image_bytes), ...]`` for product-sized images.
@@ -157,6 +164,11 @@ def extract_images_from_pdf(data: bytes) -> list[tuple[str, bytes]]:
                         raw_h and raw_h < _MIN_PDF_IMAGE_HEIGHT
                     ):
                         continue
+                    if raw_w and raw_h:
+                        aspect = max(raw_w, raw_h) / min(raw_w, raw_h)
+                        if aspect > _MAX_PDF_IMAGE_ASPECT:
+                            # Banner / letterhead / divider — skip.
+                            continue
                     try:
                         base = doc.extract_image(xref)
                     except Exception as exc:  # pragma: no cover — malformed
