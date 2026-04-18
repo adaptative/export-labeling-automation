@@ -940,3 +940,129 @@ class TestDispatcherInterimStatus:
         assert "R_KEEP_ME" in final_agent.content
         # Not wrapped in the summary template.
         assert "quick summary of what I pulled" not in final_agent.content.lower()
+
+
+# ── Turn-cap semantics (intermediate messages don't count) ─────────────────
+
+
+class TestDispatcherTurnCapCounting:
+    @pytest.mark.asyncio
+    async def test_intermediate_agent_messages_do_not_count_toward_cap(
+        self, seeded, router, registry,
+    ):
+        """Seed MAX_AGENT_TURNS intermediate agent messages and one real
+        final agent reply — the cap should NOT trip. Interim status
+        messages from tool rounds (``context.intermediate=True``) are
+        UX feedback, not independent agent turns."""
+        handler = _FakeHandler(ChatReply(text="Still responsive."))
+        register_chat_handler(handler)
+
+        extra = []
+        # Many interim-flagged agent messages — should be ignored by the
+        # turn counter.
+        for i in range(MAX_AGENT_TURNS + 5):
+            extra.append({
+                "sender_type": "agent",
+                "content": f"interim {i}",
+                "context": {"intermediate": True, "round": 1},
+            })
+        # Exactly one *real* agent reply.
+        extra.append({
+            "sender_type": "agent",
+            "content": "previous real reply",
+        })
+        extra.append({"sender_type": "human", "content": "keep going"})
+
+        thread_id = await _open_thread(
+            seeded["factory"],
+            order_id=seeded["order_id"],
+            item_no=seeded["item_no"],
+            extra_messages=extra,
+        )
+        reply = await dispatch_on_human_message(thread_id, "t1")
+        assert reply is not None
+        # Handler invoked (cap NOT tripped).
+        assert handler.calls, "handler should have been called"
+
+    @pytest.mark.asyncio
+    async def test_substantive_agent_messages_still_count(
+        self, seeded, router, registry,
+    ):
+        """Sanity — non-intermediate replies still count, so the runaway
+        protection isn't defeated."""
+        handler = _FakeHandler(ChatReply(text="should not fire"))
+        register_chat_handler(handler)
+        extra = [
+            {"sender_type": "agent", "content": f"real {i}"}
+            for i in range(MAX_AGENT_TURNS)
+        ]
+        extra.append({"sender_type": "human", "content": "still stuck?"})
+        thread_id = await _open_thread(
+            seeded["factory"],
+            order_id=seeded["order_id"],
+            item_no=seeded["item_no"],
+            extra_messages=extra,
+        )
+        reply = await dispatch_on_human_message(thread_id, "t1")
+        assert reply is None
+        assert handler.calls == []
+
+
+# ── System-message broadcast carries created_at (Invalid Date fix) ─────────
+
+
+class TestSystemMessageBroadcast:
+    @pytest.mark.asyncio
+    async def test_cap_system_message_ws_envelope_has_created_at(
+        self, seeded, router, registry,
+    ):
+        """The cap / no-handler system message used to broadcast with
+        ``created_at=null`` — the frontend rendered it as "Invalid Date".
+        After the fix we refresh the row post-commit and include the
+        ISO timestamp on the envelope."""
+        extra = [
+            {"sender_type": "agent", "content": f"turn {i}"}
+            for i in range(MAX_AGENT_TURNS)
+        ]
+        extra.append({"sender_type": "human", "content": "please help"})
+        thread_id = await _open_thread(
+            seeded["factory"],
+            order_id=seeded["order_id"],
+            item_no=seeded["item_no"],
+            extra_messages=extra,
+        )
+
+        captured: List[Dict[str, Any]] = []
+        import asyncio as _aio
+
+        sub = router.subscribe(thread_id)
+
+        async def _drain() -> None:
+            try:
+                async for env in sub:
+                    captured.append(env)
+            except _aio.CancelledError:
+                pass
+
+        drain_task = _aio.create_task(_drain())
+        try:
+            await dispatch_on_human_message(thread_id, "t1")
+            # Let the publish callback flush through the queue.
+            await _aio.sleep(0.1)
+        finally:
+            await sub.unsubscribe()
+            try:
+                await _aio.wait_for(drain_task, timeout=1.0)
+            except _aio.TimeoutError:
+                drain_task.cancel()
+
+        agent_envs = [
+            e for e in captured
+            if (e.get("type") if isinstance(e, dict) else None) == "agent_message"
+        ]
+        assert agent_envs, f"no agent_message broadcast captured: {captured!r}"
+        payload = agent_envs[-1].get("payload") or {}
+        assert payload.get("sender_type") == "system"
+        assert payload.get("created_at"), (
+            f"created_at missing from system broadcast payload: {payload!r}"
+        )
