@@ -398,7 +398,33 @@ async def generate_drawing_activity(input: ActivityInput) -> ActivityOutput:
             )
             docs = rows.scalars().all()
 
-        pdf_docs = [d for d in docs if d.filename.lower().endswith(".pdf")]
+        # Only pull images from PDFs that actually carry product
+        # photography — PO / PI docs. Skip carton-marking / labeling-
+        # guide / protocol / compliance PDFs whose images are sample
+        # carton-side artwork or reference diagrams, not the product
+        # itself. Heuristic: filename match against a negative list.
+        # If every PDF hits the negative list, fall back to using all
+        # PDFs so we still produce *something* rather than 0 drawings.
+        _PROTOCOL_HINTS = (
+            "carton", "marking", "labeling", "label guide",
+            "protocol", "spec", "compliance", "guide", "manual",
+            "instruction", "policy",
+        )
+
+        def _is_protocol_pdf(name: str) -> bool:
+            n = name.lower()
+            return any(h in n for h in _PROTOCOL_HINTS)
+
+        all_pdfs = [d for d in docs if d.filename.lower().endswith(".pdf")]
+        product_pdfs = [d for d in all_pdfs if not _is_protocol_pdf(d.filename)]
+        pdf_docs = product_pdfs or all_pdfs
+        if product_pdfs != all_pdfs:
+            skipped = [d.filename for d in all_pdfs if _is_protocol_pdf(d.filename)]
+            activity.logger.info(
+                "generate_drawing: skipping %d protocol/guide PDFs (%r) — "
+                "only product-bearing PDFs are scanned for line-art",
+                len(skipped), skipped,
+            )
         if not pdf_docs:
             activity.logger.info(
                 "generate_drawing: no PDF documents on order %s — "
