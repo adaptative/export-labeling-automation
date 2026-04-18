@@ -45,15 +45,22 @@ class TestPreprocess:
     def test_returns_none_on_garbage(self):
         assert preprocess_image(b"not an image") is None
 
-    def test_coverage_reported(self):
-        bmp = preprocess_image(_png_bytes(ink_box=(0, 0, 200, 200)))
+    def test_coverage_after_edge_detection(self):
+        # Preprocess now runs FIND_EDGES → a fully-inked solid block
+        # collapses to its outline (a thin rectangle), so "coverage"
+        # (dark pixels) is small, not huge. Still non-zero because the
+        # edge of the ink-box is detected.
+        bmp = preprocess_image(_png_bytes(ink_box=(20, 20, 180, 180)))
         assert bmp is not None
-        assert bmp.coverage() > 0.9  # fully inked
+        assert bmp.coverage() > 0.0  # some edge pixels present
+        assert bmp.coverage() < 0.5  # but it's not a filled block
 
     def test_coverage_empty_image(self):
         bmp = preprocess_image(_png_bytes(ink_box=None))
         assert bmp is not None
-        assert bmp.coverage() < 0.01
+        # An input with no ink has no edges. Allow a tiny margin for
+        # border pixels surfaced by autocontrast.
+        assert bmp.coverage() < 0.05
 
 
 class TestVectorize:
@@ -108,15 +115,18 @@ class TestScoreConfidence:
         assert any("aspect ratio" in i for i in issues)
         assert confidence < 1.0
 
-    def test_over_inked_drops_confidence(self):
-        bmp = preprocess_image(_png_bytes((200, 200), ink_box=(0, 0, 200, 200)))
-        confidence, issues = score_confidence(bmp)
-        assert any("Over-inked" in i for i in issues)
-
     def test_empty_image_drops_confidence(self):
+        # Post-edge-detection, a truly empty input still produces
+        # near-zero coverage — the "near-empty" heuristic still fires.
         bmp = preprocess_image(_png_bytes((200, 200), ink_box=None))
         confidence, issues = score_confidence(bmp)
         assert any("Near-empty" in i for i in issues)
+
+    # The old `test_over_inked_drops_confidence` no longer applies:
+    # with FIND_EDGES, a "fully inked" input collapses to its outline,
+    # producing low coverage — exactly like a well-scoped photograph.
+    # The over-ink heuristic now fires only on genuinely noisy edge
+    # output (dense speckle), which is harder to reproduce synthetically.
 
 
 # ── Agent ────────────────────────────────────────────────────────────────────

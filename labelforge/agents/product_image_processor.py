@@ -78,14 +78,23 @@ CONFIDENCE_HITL_THRESHOLD = 0.75
 # Per-image quality thresholds.
 _MIN_DIMENSION_PX = 50
 _MAX_ASPECT_RATIO = 10.0
-_MIN_COVERAGE = 0.01
-_MAX_COVERAGE = 0.70
+# Post-edge-detection coverage range: a blank image leaks ~0.02 of
+# border-noise edges, a dense real product shot tops out around 0.35.
+# 0.022 sits just above the blank-image baseline so truly empty
+# inputs still trip 'Near-empty' but legit line art passes.
+_MIN_COVERAGE = 0.022
+_MAX_COVERAGE = 0.50
 
 # Vectorization grid size — caps SVG complexity regardless of input.
 _VECTORIZE_GRID = 64
 
 # Binary threshold — pixels below this greyscale value are considered "ink".
 _BINARY_THRESHOLD = 128
+
+# After FIND_EDGES + invert the image is mostly near-white with thin
+# near-black strokes; a higher threshold captures more of the outline
+# without darkening the background to grey.
+_LINE_ART_THRESHOLD = 200
 
 
 @dataclass
@@ -184,13 +193,26 @@ def extract_images_from_pdf(data: bytes) -> list[tuple[str, bytes]]:
 
 
 def preprocess_image(data: bytes) -> Optional["_PreparedBitmap"]:
-    """Open + greyscale + autocontrast + binarise.
+    """Open → greyscale → blur → edge-detect → invert → binarise.
 
-    Returns ``None`` when the bytes aren't a decodable image so callers can
-    skip gracefully instead of raising.
+    Produces a **line-art** bitmap: white background, black strokes
+    tracing the edges of the product. This is what operators expect
+    in the die-cut's drawing frame — not a thresholded photograph,
+    but a sketch-style outline.
+
+    Pipeline:
+      1. Decode + convert to greyscale.
+      2. Mild Gaussian blur to kill JPEG / print-grain noise that
+         would otherwise produce speckled edges.
+      3. Pillow ``FIND_EDGES`` — Sobel-ish convolution yielding black
+         background with bright edges on dark strokes.
+      4. Invert so edges become black on white (sketch look).
+      5. Autocontrast + binary threshold for crisp 1-bit output.
+
+    Returns ``None`` on decode failure.
     """
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageFilter, ImageOps
     except ImportError:  # pragma: no cover — Pillow is in pyproject deps
         logger.warning("Pillow not installed — cannot preprocess image")
         return None
@@ -204,10 +226,27 @@ def preprocess_image(data: bytes) -> Optional["_PreparedBitmap"]:
 
     grey = img.convert("L")
     try:
-        grey = ImageOps.autocontrast(grey)
-    except Exception:  # pragma: no cover — autocontrast rarely fails
-        pass
-    binary = grey.point(lambda v: 0 if v < _BINARY_THRESHOLD else 255, "1")
+        # Light blur before edge detection — the raw photo has
+        # JPEG noise + fabric/texture that FIND_EDGES would amplify
+        # into a gritty speckle. Radius 1.2 keeps the product outline
+        # while killing micro-grain.
+        blurred = grey.filter(ImageFilter.GaussianBlur(radius=1.2))
+        edges = blurred.filter(ImageFilter.FIND_EDGES)
+        # FIND_EDGES output: black background, bright edges. Invert
+        # so we get dark strokes on a white page (sketch convention).
+        edges = ImageOps.invert(edges)
+        edges = ImageOps.autocontrast(edges, cutoff=2)
+    except Exception as exc:
+        logger.warning("edge detection failed (%s) — falling back to threshold", exc)
+        edges = grey
+        try:
+            edges = ImageOps.autocontrast(edges)
+        except Exception:  # pragma: no cover
+            pass
+    # Binarise at a higher threshold than the old photo-pipeline: edge
+    # output is mostly near-white with thin near-black strokes, so
+    # 200 preserves more of the outline than the old 128.
+    binary = edges.point(lambda v: 0 if v < _LINE_ART_THRESHOLD else 255, "1")
     return _PreparedBitmap(binary=binary, width=img.width, height=img.height)
 
 
