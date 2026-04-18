@@ -317,6 +317,20 @@ class ThreadResolver:
                 ),
             )
 
+        # Fire the chat dispatcher *only* on human messages. Agent and
+        # system messages must not re-dispatch — that's how we stop an
+        # infinite reply loop once the chat-handler posts its response.
+        if req.sender_type == "human":
+            try:
+                from labelforge.services.hitl.chat_dispatcher import schedule_dispatch
+                # Ensure per-agent handlers are imported + registered.
+                # Importing here (not at module top) avoids a circular
+                # import between resolver ↔ chat handlers ↔ models.
+                import labelforge.agents.chat_handlers  # noqa: F401
+                schedule_dispatch(thread.id, req.tenant_id)
+            except Exception as exc:  # pragma: no cover — best-effort
+                logger.warning("HITL chat dispatch schedule failed: %s", exc)
+
         return message
 
     # ── Resolve ─────────────────────────────────────────────────────────
@@ -519,6 +533,16 @@ class ThreadResolver:
                 },
             ),
         )
+
+        # Option-select is a human-initiated signal — kick the chat
+        # handler so it can react (same rationale as ``add_message``).
+        try:
+            from labelforge.services.hitl.chat_dispatcher import schedule_dispatch
+            import labelforge.agents.chat_handlers  # noqa: F401
+            schedule_dispatch(thread.id, tenant_id)
+        except Exception as exc:  # pragma: no cover — best-effort
+            logger.warning("HITL chat dispatch schedule (option) failed: %s", exc)
+
         return message
 
 

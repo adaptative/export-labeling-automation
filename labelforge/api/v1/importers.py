@@ -175,6 +175,8 @@ class OnboardingFinalizeRequest(BaseModel):
 class OnboardingFinalizeResponse(BaseModel):
     importer_id: str
     profile_version: int
+    promoted_rules: int = 0
+    promoted_warnings: int = 0
 
 
 class RequestFromBuyerResponse(BaseModel):
@@ -192,14 +194,33 @@ _AGENT_DOC_TYPES = {"protocol", "warnings", "checklist"}
 
 
 def _classify_doc_type(filename: str) -> str:
-    """Map an uploaded filename to a known doc type using simple keyword hints."""
+    """Map an uploaded filename to a known doc type using simple keyword hints.
+
+    Order matters — more-specific buckets first so that a carton-marking
+    protocol PDF (which may mention "label" or "warning" in its name)
+    doesn't get routed to the ``warnings`` agent by accident. The
+    pipeline's ProtocolAnalyzer produces ``brand_treatment`` /
+    ``panel_layouts`` / ``handling_symbol_rules`` — without these the
+    ComposerAgent falls back to a generic LOGO/barcode layout, which is
+    the class of bug reported when the die-cut SVG looked nothing like
+    the importer's real spec.
+    """
     lower = filename.lower()
-    if "protocol" in lower:
-        return "protocol"
-    if "warning" in lower or "label" in lower:
-        return "warnings"
     if "checklist" in lower or "rules" in lower:
         return "checklist"
+    # Carton-marking / packaging / protocol specs all describe how labels
+    # are laid out on the carton. Route them to the ProtocolAnalyzer.
+    if (
+        "protocol" in lower
+        or "carton" in lower
+        or "packag" in lower
+        or "marking" in lower
+        or "spec" in lower
+        or ("vendor" in lower and ("expectation" in lower or "guide" in lower or "manual" in lower))
+    ):
+        return "protocol"
+    if "warning" in lower or ("label" in lower and "marking" not in lower):
+        return "warnings"
     if "logo" in lower:
         return "logo"
     if lower.endswith(".xlsx") or lower.endswith(".xls"):
@@ -921,40 +942,348 @@ async def finalize_onboarding(
     _user: TokenPayload = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> OnboardingFinalizeResponse:
-    """Create an ``ImporterProfileModel`` from reviewed values and close the session."""
+    """Create an ``ImporterProfileModel`` from reviewed values, promote
+    agent-extracted rules + warning labels into the canonical tables, and
+    close the onboarding session. This is the single place where
+    "uploaded documents" become "the configuration the pipeline uses".
+    """
     importer = await _get_importer_or_404(db, importer_id, _user.tenant_id)
 
     current = await _latest_profile(db, importer.id)
     new_version = (current.version + 1) if current else 1
+
+    # Always mine the most recent session — even one already marked
+    # ``completed`` — so re-finalizing after a protocol re-run still
+    # promotes the freshly-extracted values. Previously we restricted
+    # this to ``in_progress``/``ready_for_review`` which stranded newly
+    # extracted protocol data once a prior finalize had closed the row.
+    session_result = await db.execute(
+        select(ImporterOnboardingSession)
+        .where(
+            ImporterOnboardingSession.importer_id == importer_id,
+            ImporterOnboardingSession.tenant_id == _user.tenant_id,
+        )
+        .order_by(ImporterOnboardingSession.started_at.desc())
+    )
+    sessions = list(session_result.scalars().all())
+
+    extracted_values: dict = {}
+    if sessions:
+        extracted_values = sessions[0].extracted_values or {}
+    for session in sessions:
+        # Only transition open sessions. Completed ones stay completed
+        # but we still read their extracted values.
+        if session.status != "completed":
+            session.status = "completed"
+            session.completed_at = datetime.now(timezone.utc)
+
+    # When the operator passes ``{}`` (or partial overrides), fall back to
+    # the values extracted by the ProtocolAnalyzer so the importer profile
+    # actually reflects the uploaded documents. Without this, a finalize
+    # call with no body produces a null profile and the Composer emits
+    # the generic LOGO/barcode fallback.
+    protocol_extracted = (extracted_values.get("protocol") or {}) if isinstance(extracted_values, dict) else {}
+
+    def _prefer(body_val, extracted_val):
+        """Prefer explicit body value; else use extraction; else None."""
+        if body_val:
+            return body_val
+        return extracted_val or None
 
     new_profile = ImporterProfileModel(
         id=str(uuid4()),
         importer_id=importer.id,
         tenant_id=_user.tenant_id,
         version=new_version,
-        brand_treatment=body.brand_treatment,
-        panel_layouts=body.panel_layouts,
-        handling_symbol_rules=body.handling_symbol_rules,
+        brand_treatment=_prefer(body.brand_treatment, protocol_extracted.get("brand_treatment")),
+        panel_layouts=_prefer(body.panel_layouts, protocol_extracted.get("panel_layouts")),
+        handling_symbol_rules=_prefer(body.handling_symbol_rules, protocol_extracted.get("handling_symbol_rules")),
         pi_template_mapping=body.pi_template_mapping,
         logo_asset_hash=body.logo_asset_hash,
     )
     db.add(new_profile)
 
-    # Close any in-progress session
-    session_result = await db.execute(
+    promoted = await _promote_extracted_to_canonical(
+        db, _user.tenant_id, extracted_values
+    )
+
+    await db.commit()
+    return OnboardingFinalizeResponse(
+        importer_id=importer_id,
+        profile_version=new_version,
+        promoted_rules=promoted["rules"],
+        promoted_warnings=promoted["warnings"],
+    )
+
+
+async def _promote_extracted_to_canonical(
+    db: AsyncSession,
+    tenant_id: str,
+    extracted: dict,
+) -> dict[str, int]:
+    """Upsert extracted rules + warning labels into their canonical tables.
+
+    Called from ``/onboard/finalize`` and also exposed as a standalone
+    ``/onboard/promote-extracted`` endpoint so an operator can replay
+    promotion for a session that was finalized before this wiring existed.
+
+    Keys used for idempotence:
+      - ``ComplianceRule``: ``(tenant_id, rule_code)`` — version bumped on
+        re-promote.
+      - ``WarningLabel``: ``(tenant_id, code)`` — body refreshed in place.
+    """
+    from labelforge.db.models import ComplianceRule, WarningLabel
+
+    promoted = {"rules": 0, "warnings": 0}
+
+    rules = ((extracted or {}).get("checklist") or {}).get("rules") or []
+    for r in rules:
+        code = r.get("rule_code") or r.get("code")
+        if not code:
+            continue
+        logic = r.get("conditions") or r.get("logic") or {}
+        title = (r.get("title") or r.get("name") or code)[:500]
+        region = r.get("region") or r.get("country") or "US"
+        placement = r.get("placement") or "both"
+
+        existing = (await db.execute(
+            select(ComplianceRule).where(
+                ComplianceRule.tenant_id == tenant_id,
+                ComplianceRule.rule_code == code,
+            )
+        )).scalar_one_or_none()
+        if existing is None:
+            db.add(ComplianceRule(
+                id=str(uuid4()),
+                tenant_id=tenant_id,
+                rule_code=code,
+                version=1,
+                title=title,
+                description=r.get("description"),
+                region=region,
+                placement=placement,
+                logic=logic,
+                is_active=True,
+            ))
+        else:
+            existing.title = title
+            existing.description = r.get("description") or existing.description
+            existing.region = region
+            existing.placement = placement
+            existing.logic = logic or existing.logic
+            existing.is_active = True
+            existing.version = (existing.version or 1) + 1
+        promoted["rules"] += 1
+
+    labels = ((extracted or {}).get("warnings") or {}).get("labels") or []
+    for wl in labels:
+        code = wl.get("label_code") or wl.get("code")
+        if not code:
+            continue
+        text_en = wl.get("text_en") or wl.get("text") or ""
+        if not text_en:
+            continue
+        title = (wl.get("title") or code)[:500]
+        region = wl.get("region") or wl.get("country") or "US"
+        placement = wl.get("placement") or "both"
+
+        existing = (await db.execute(
+            select(WarningLabel).where(
+                WarningLabel.tenant_id == tenant_id,
+                WarningLabel.code == code,
+            )
+        )).scalar_one_or_none()
+        if existing is None:
+            db.add(WarningLabel(
+                id=str(uuid4()),
+                tenant_id=tenant_id,
+                code=code,
+                title=title,
+                text_en=text_en,
+                text_es=wl.get("text_es"),
+                text_fr=wl.get("text_fr"),
+                region=region,
+                placement=placement,
+                is_active=True,
+                status="approved",
+            ))
+        else:
+            existing.title = title
+            existing.text_en = text_en
+            existing.text_es = wl.get("text_es") or existing.text_es
+            existing.text_fr = wl.get("text_fr") or existing.text_fr
+            existing.region = region
+            existing.placement = placement
+            existing.is_active = True
+        promoted["warnings"] += 1
+
+    return promoted
+
+
+class RerunAgentRequest(BaseModel):
+    agent: str  # "protocol" | "warnings" | "checklist"
+    document_id: Optional[str] = None  # if omitted we pick the best matching doc
+
+
+@router.post(
+    "/{importer_id}/onboard/rerun-agent",
+    response_model=dict,
+)
+async def rerun_onboarding_agent(
+    importer_id: str,
+    body: RerunAgentRequest,
+    background_tasks: BackgroundTasks,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Re-run a single onboarding agent against an already-uploaded
+    document — primarily to backfill the ProtocolAnalyzer when the
+    original classifier mis-routed a carton-marking PDF to ``warnings``.
+
+    - ``agent`` must be one of ``protocol | warnings | checklist``.
+    - ``document_id`` pins the source doc. When omitted we pick the
+      largest doc of the best-matching ``doc_type`` (protocol → protocol
+      then other; warnings → warnings; checklist → checklist).
+    """
+    from labelforge.api.v1.documents import get_blob_store
+
+    if body.agent not in _AGENT_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown agent '{body.agent}'")
+
+    await _get_importer_or_404(db, importer_id, _user.tenant_id)
+
+    doc_q = select(ImporterDocument).where(
+        ImporterDocument.importer_id == importer_id,
+        ImporterDocument.tenant_id == _user.tenant_id,
+    )
+    if body.document_id:
+        doc_q = doc_q.where(ImporterDocument.id == body.document_id)
+    docs = (await db.execute(doc_q)).scalars().all()
+    if not docs:
+        raise HTTPException(status_code=404, detail="No documents found for importer")
+
+    # Pick the doc to run on. When the caller pinned a document_id we
+    # already filtered to a singleton; otherwise we want the largest
+    # doc whose type best matches the requested agent.
+    def _match_score(d: ImporterDocument) -> int:
+        if body.agent == "protocol":
+            if d.doc_type == "protocol":
+                return 3
+            if d.doc_type == "other":
+                return 2
+            if d.doc_type == "warnings":
+                return 1
+            return 0
+        if body.agent == "warnings":
+            return 3 if d.doc_type == "warnings" else 0
+        if body.agent == "checklist":
+            return 3 if d.doc_type == "checklist" else 0
+        return 0
+
+    docs_ranked = sorted(
+        docs,
+        key=lambda d: (_match_score(d), d.size_bytes or 0),
+        reverse=True,
+    )
+    target = docs_ranked[0]
+    if body.document_id is None and _match_score(target) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No uploaded document looks like a {body.agent} source; specify document_id explicitly",
+        )
+
+    # Find or create the current onboarding session.
+    sess_result = await db.execute(
         select(ImporterOnboardingSession)
         .where(
             ImporterOnboardingSession.importer_id == importer_id,
             ImporterOnboardingSession.tenant_id == _user.tenant_id,
-            ImporterOnboardingSession.status == "in_progress",
         )
+        .order_by(desc(ImporterOnboardingSession.started_at))
     )
-    for session in session_result.scalars().all():
-        session.status = "completed"
-        session.completed_at = datetime.now(timezone.utc)
+    session = sess_result.scalars().first()
+    if session is None:
+        session = ImporterOnboardingSession(
+            id=f"onb-{uuid4().hex[:8]}",
+            tenant_id=_user.tenant_id,
+            importer_id=importer_id,
+            status="in_progress",
+            agents_state={k: {"status": "pending"} for k in _AGENT_KEYS},
+            extracted_values={},
+        )
+        db.add(session)
 
+    agents_state = dict(session.agents_state or {})
+    agents_state[body.agent] = {"status": "running"}
+    session.agents_state = agents_state
+    if session.status == "completed":
+        session.status = "in_progress"
+        session.completed_at = None
+    session_id = session.id
     await db.commit()
-    return OnboardingFinalizeResponse(importer_id=importer_id, profile_version=new_version)
+
+    # Load the blob and schedule the background task.
+    store = get_blob_store()
+    try:
+        content = await store.download(target.s3_key)
+    except (FileNotFoundError, KeyError):
+        raise HTTPException(status_code=404, detail="Source document blob missing")
+
+    background_tasks.add_task(
+        _run_onboarding_agent,
+        session_id=session_id,
+        tenant_id=_user.tenant_id,
+        importer_id=importer_id,
+        agent_key=body.agent,
+        filename=target.filename,
+        content=content,
+    )
+
+    return {
+        "importer_id": importer_id,
+        "agent": body.agent,
+        "document_id": target.id,
+        "filename": target.filename,
+        "session_id": session_id,
+        "status": "scheduled",
+    }
+
+
+@router.post(
+    "/{importer_id}/onboard/promote-extracted",
+    response_model=dict,
+)
+async def promote_extracted_values(
+    importer_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Replay rule / warning promotion for the latest onboarding session.
+
+    Escape hatch for importers whose onboarding ran before the finalize
+    endpoint promoted extracted values — lets an operator push the already-
+    extracted ``checklist.rules`` + ``warnings.labels`` into the live tables
+    without re-uploading the source PDFs.
+    """
+    await _get_importer_or_404(db, importer_id, _user.tenant_id)
+
+    result = await db.execute(
+        select(ImporterOnboardingSession)
+        .where(
+            ImporterOnboardingSession.importer_id == importer_id,
+            ImporterOnboardingSession.tenant_id == _user.tenant_id,
+        )
+        .order_by(ImporterOnboardingSession.started_at.desc())
+    )
+    session = result.scalars().first()
+    if session is None:
+        raise HTTPException(status_code=404, detail="No onboarding session to promote")
+
+    promoted = await _promote_extracted_to_canonical(
+        db, _user.tenant_id, session.extracted_values or {}
+    )
+    await db.commit()
+    return {"importer_id": importer_id, **promoted}
 
 
 # ── Background agent runner ──────────────────────────────────────────────────

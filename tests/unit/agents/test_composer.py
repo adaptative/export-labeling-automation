@@ -99,16 +99,18 @@ def test_warning_labels_placed():
     assert "fragile" in symbols or "FRAGILE" in symbols
 
 
-def test_warnings_go_to_correct_panel():
-    """Warnings should render only on panels that list 'warnings' field."""
+def test_warnings_rendered_on_every_panel():
+    """After DieCut-Review F12 the composer uses a fixed L-W-L-W panel
+    layout and warnings appear on every panel rather than being scoped
+    to a single named slot."""
     agent = ComposerAgent()
     result = asyncio.run(agent.execute({
         "fused_item": _fused(),
         "importer_profile": _profile(),
-        "compliance_report": _report(),
+        "compliance_report": _report(warnings=["Prop 65", "Non-Food Use"]),
     }))
     warning_panels = {p["panel"] for p in result.data["placements"] if p["type"] == "warning"}
-    assert warning_panels == {"carton_side"}
+    assert warning_panels == {"long_front", "short_right", "long_back", "short_left"}
 
 
 # ── Drawing insertion ──────────────────────────────────────────────────────
@@ -168,7 +170,12 @@ def test_quantity_field_renders():
         "importer_profile": profile,
         "compliance_report": _report(),
     }))
-    assert "Qty: 24" in result.data["die_cut_svg"]
+    # The long-panel info block now uses the importer-standard
+    # "CASE QTY : <N> PCS" phrasing — the legacy "Qty: N" shorthand was
+    # dropped because it duplicated the CASE QTY line and confused reviewers.
+    svg = result.data["die_cut_svg"]
+    assert "CASE QTY : 24 PCS" in svg
+    assert "Qty: 24" not in svg
 
 
 def test_dimensions_field_renders():
@@ -179,7 +186,12 @@ def test_dimensions_field_renders():
         "importer_profile": profile,
         "compliance_report": _report(),
     }))
-    assert "Box: 12.5 x 10.0 x 8.5" in result.data["die_cut_svg"]
+    # The long-panel info block now emits a single "DIMENSIONS : ..." line
+    # with inch units; the older "Box: L x W x H" shorthand was dropped
+    # because it duplicated DIMENSIONS and used mixed units.
+    svg = result.data["die_cut_svg"]
+    assert 'DIMENSIONS : 12.5"L x 10"W x 8.5"H' in svg
+    assert "Box: 12.5 x 10.0 x 8.5" not in svg
 
 
 # ── Provenance ──────────────────────────────────────────────────────────────
@@ -217,8 +229,12 @@ def test_missing_item_no_fails_to_hitl():
     assert result.needs_hitl is True
 
 
-def test_panel_layouts_dict_form_normalized():
-    """Onboarding wizard shape: {panel: {selected: true, ...}}."""
+def test_panel_layout_is_always_four_panels():
+    """After DieCut-Review F2 the composer no longer forwards the
+    profile's named panels to the canvas — it always emits the spec's
+    four-panel LONG-SHORT-LONG-SHORT carton. The profile's
+    ``panel_layouts`` contribute to the validator's required-fields set
+    but not to panel count."""
     agent = ComposerAgent()
     profile = _profile(panel_layouts={
         "carton_top": {"selected": True, "fields": ["upc", "item_description"]},
@@ -230,5 +246,6 @@ def test_panel_layouts_dict_form_normalized():
         "compliance_report": _report(),
     }))
     placements = result.data["placements"]
-    # Only carton_top should be drawn.
-    assert {p["panel"] for p in placements} == {"carton_top"}
+    assert {p["panel"] for p in placements} == {
+        "long_front", "short_right", "long_back", "short_left",
+    }

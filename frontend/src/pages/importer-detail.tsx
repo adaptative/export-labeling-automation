@@ -17,7 +17,7 @@ import {
   Building2, Globe, Mail, User, Tag, FileText, CheckCircle2, AlertCircle,
   Clock, ExternalLink, Package, ChevronRight, Settings, Layers,
   Upload, Download, Trash2, RefreshCw, Send, Plus, FilePlus, Eye,
-  FileType2, File, MoreHorizontal, Save, X, Loader2,
+  FileType2, File, MoreHorizontal, Save, X, Loader2, AlertTriangle,
 } from 'lucide-react';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -441,6 +441,14 @@ export default function ImporterDetail() {
   const [docs, setDocs] = useState<DocStore>({});
   const [docsLoaded, setDocsLoaded] = useState(false);
 
+  /* ── Onboarding-session state (for importers that were uploaded-to
+     but never ran `finalize`) ── */
+  const [onboardingSession, setOnboardingSession] = useState<{
+    status: string;
+    extracted_values: Record<string, unknown>;
+    agents: Record<string, { status: string; [k: string]: unknown }>;
+  } | null>(null);
+
   /* ── Edit mode state ── */
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({
@@ -590,6 +598,34 @@ export default function ImporterDetail() {
       fetchDocuments();
     }
   }, [importer, docsLoaded, fetchDocuments]);
+
+  /* ── Fetch onboarding session (if any) ─────────────────────────────
+     For importers whose operators uploaded files and ran the extraction
+     agents but never clicked "Finalize", the ImporterProfile row is null
+     and the Overview would otherwise look empty. We render a banner +
+     the extracted warnings/checklist summary instead. */
+  const fetchOnboardingSession = useCallback(async () => {
+    if (!importerId) return;
+    try {
+      const data = await apiGet<{
+        status: string;
+        extracted_values: Record<string, unknown>;
+        agents: Record<string, { status: string }>;
+      }>(`/importers/${importerId}/onboarding/extraction`);
+      setOnboardingSession({
+        status: data.status,
+        extracted_values: data.extracted_values ?? {},
+        agents: data.agents ?? {},
+      });
+    } catch {
+      // 404 → no session yet; silent, the banner simply won't render.
+      setOnboardingSession(null);
+    }
+  }, [importerId]);
+
+  useEffect(() => {
+    if (importer) fetchOnboardingSession();
+  }, [importer, fetchOnboardingSession]);
 
   /* ── Upload complete handler ── */
   const handleUploadComplete = useCallback((docId: string, filename: string, sizeMb: number) => {
@@ -771,7 +807,20 @@ export default function ImporterDetail() {
     );
   }
 
-  const allDocIds = [...(importer.doc_requirements ?? []), ...adHocDocs];
+  // Union required slots, ad-hoc slots, *and* any doc_type returned from
+  // ``/documents``. Without the third source, importers created outside the
+  // onboarding wizard (empty ``doc_requirements``) would render zero tiles
+  // even though the API has files attached — the exact symptom reported.
+  const attachedDocTypes = Object.keys(docs).filter(
+    (k) => docs[k] && !docs[k]?.uploading,
+  );
+  const allDocIds = Array.from(
+    new Set<string>([
+      ...(importer.doc_requirements ?? []),
+      ...adHocDocs,
+      ...attachedDocTypes,
+    ]),
+  );
   const receivedCount = allDocIds.filter(d => docs[d] && !docs[d]?.uploading).length;
   const pendingCount = allDocIds.filter(d => !docs[d] || docs[d]?.uploading).length;
 
@@ -896,6 +945,98 @@ export default function ImporterDetail() {
         <div className="flex-1 overflow-auto bg-background">
           {/* ── Overview ── */}
           <TabsContent value="overview" className="m-0 p-6 space-y-5">
+            {/* Onboarding-session banner — only when the agents have run
+                but finalize was never clicked. Shows a quick summary of the
+                extracted values + a CTA back to the wizard. */}
+            {onboardingSession &&
+              onboardingSession.status !== 'completed' && (
+                <div className="border border-amber-200 bg-amber-50 rounded-xl p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-amber-900 flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4" /> Onboarding in review
+                      </h3>
+                      <p className="text-xs text-amber-800 mt-0.5">
+                        Agents extracted data from the uploaded documents. Review and finalize to promote these values to the importer profile.
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setLocation(`/onboarding/importer?importer_id=${importerId}`)}
+                    >
+                      Review &amp; finalize <ChevronRight className="w-3.5 h-3.5 ml-1" />
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                    {(['protocol', 'warnings', 'checklist'] as const).map((k) => {
+                      const agent = onboardingSession.agents[k];
+                      const status = agent?.status ?? 'pending';
+                      const palette =
+                        status === 'completed'
+                          ? 'bg-green-100 text-green-800 border-green-200'
+                          : status === 'running'
+                          ? 'bg-blue-100 text-blue-800 border-blue-200'
+                          : status === 'failed'
+                          ? 'bg-red-100 text-red-800 border-red-200'
+                          : 'bg-gray-100 text-gray-700 border-gray-200';
+                      return (
+                        <div key={k} className={`border rounded-md px-2 py-1.5 ${palette}`}>
+                          <div className="font-semibold capitalize">{k}</div>
+                          <div className="opacity-80">{status}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {(() => {
+                    const ev = onboardingSession.extracted_values ?? {};
+                    const warnings = (ev.warnings as any)?.labels as any[] | undefined;
+                    const checklist =
+                      ((ev.checklist as any)?.documents as any[] | undefined) ??
+                      ((ev.checklist as any)?.items as any[] | undefined);
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                        {warnings && warnings.length > 0 && (
+                          <div>
+                            <p className="font-semibold text-amber-900 mb-1">
+                              Warning labels ({warnings.length})
+                            </p>
+                            <ul className="space-y-0.5 list-disc list-inside text-amber-950">
+                              {warnings.slice(0, 4).map((w, i) => (
+                                <li key={i} className="truncate">
+                                  <span className="font-mono">{w.label_code ?? '—'}</span>
+                                  {w.text_en ? ` · ${String(w.text_en).slice(0, 64)}${w.text_en.length > 64 ? '…' : ''}` : ''}
+                                </li>
+                              ))}
+                              {warnings.length > 4 && (
+                                <li className="text-amber-700">+ {warnings.length - 4} more</li>
+                              )}
+                            </ul>
+                          </div>
+                        )}
+                        {checklist && checklist.length > 0 && (
+                          <div>
+                            <p className="font-semibold text-amber-900 mb-1">
+                              Checklist items ({checklist.length})
+                            </p>
+                            <ul className="space-y-0.5 list-disc list-inside text-amber-950">
+                              {checklist.slice(0, 4).map((c, i) => (
+                                <li key={i} className="truncate">
+                                  {String(c.name ?? c.label ?? c.text ?? JSON.stringify(c)).slice(0, 80)}
+                                </li>
+                              ))}
+                              {checklist.length > 4 && (
+                                <li className="text-amber-700">+ {checklist.length - 4} more</li>
+                              )}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
             {/* Edit mode panel */}
             {editing && (
               <div className="border rounded-xl p-5 space-y-4 bg-card">

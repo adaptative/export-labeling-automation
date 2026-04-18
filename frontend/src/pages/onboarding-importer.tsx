@@ -36,6 +36,7 @@ import {
   Eye,
   Pencil,
   Info,
+  RefreshCw,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
@@ -297,6 +298,10 @@ export default function OnboardingImporter() {
   const [extractionData, setExtractionData] = useState<Record<string, unknown> | null>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollingStartRef = useRef<number>(0);
+  // Flips to true if the spinner has been up long enough that we should
+  // offer the user a manual escape hatch. Driven by a timer set in the
+  // step-3 mount effect.
+  const [extractionStuck, setExtractionStuck] = useState(false);
 
   const toggleArrayItem = (arr: string[], item: string): string[] =>
     arr.includes(item) ? arr.filter((x) => x !== item) : [...arr, item];
@@ -576,6 +581,62 @@ export default function OnboardingImporter() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, hasDocUploads, importerId, runExtraction, startExtractionPolling]);
+
+  /* ── Defensive unblock for step 3 ─────────────────────────────────
+     Runs once whenever we land on step 3 with an ``importerId`` set.
+     Hits ``/onboarding/extraction`` directly — independent of the
+     useCallback identity churn that can stall the interval-based
+     poll() above — and seeds the review UI if the backend already
+     reports ``ready_for_review``/``completed``. Also arms a 25 s
+     "stuck" timer that unlocks a manual continue button. */
+  useEffect(() => {
+    if (step !== 3 || !importerId) return;
+    setExtractionStuck(false);
+    const stuckTimer = window.setTimeout(() => setExtractionStuck(true), 25_000);
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await apiGet<{
+          status: string;
+          agents: Record<string, { status: string }>;
+          extracted_values: Record<string, unknown> | null;
+        }>(`/importers/${importerId}/onboarding/extraction`);
+        if (cancelled) return;
+        if (data.status === 'ready_for_review' || data.status === 'completed' || data.status === 'failed') {
+          const ev = data.extracted_values ?? {};
+          const flattened: Record<string, unknown> = { ...ev };
+          const warningsData = ev.warnings as Record<string, unknown> | undefined;
+          if (warningsData?.labels) flattened.warning_labels = warningsData.labels;
+          const checklistData = ev.checklist as Record<string, unknown> | undefined;
+          if (checklistData?.rules) flattened.compliance_rules = checklistData.rules;
+          const protocolData = ev.protocol as Record<string, unknown> | undefined;
+          if (protocolData?.brand_treatment) flattened.brand_treatment = protocolData.brand_treatment;
+          if (protocolData?.panel_layouts) flattened.panel_layouts = protocolData.panel_layouts;
+          if (protocolData?.handling_symbol_rules) flattened.handling_symbol_rules = protocolData.handling_symbol_rules;
+
+          setExtractionData(flattened);
+          if (pollingRef.current) {
+            clearInterval(pollingRef.current);
+            pollingRef.current = null;
+          }
+          setAiProgress(100);
+          setAiDone(true);
+          setExtracting(false);
+          setExtractionDone(true);
+          setExtractionStuck(false);
+        }
+      } catch {
+        // Silent — step-3 polling effect will take over if this 404s.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(stuckTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, importerId]);
 
   useEffect(() => {
     if (step !== 4) return;
@@ -1083,6 +1144,60 @@ export default function OnboardingImporter() {
                         <p className="text-sm font-medium">Extracting requirements from documents…</p>
                         <p className="text-xs text-muted-foreground mt-1">Parsing label specs, compliance rules, and field definitions</p>
                       </div>
+                      {extractionStuck && (
+                        <div className="pt-2 flex items-center justify-center gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={async () => {
+                              if (!importerId) return;
+                              try {
+                                const data = await apiGet<{
+                                  status: string;
+                                  extracted_values: Record<string, unknown> | null;
+                                }>(`/importers/${importerId}/onboarding/extraction`);
+                                const ev = data.extracted_values ?? {};
+                                const flattened: Record<string, unknown> = { ...ev };
+                                const warnings = (ev.warnings as any)?.labels;
+                                if (warnings) flattened.warning_labels = warnings;
+                                const checklist = (ev.checklist as any)?.rules;
+                                if (checklist) flattened.compliance_rules = checklist;
+                                setExtractionData(flattened);
+                                if (pollingRef.current) {
+                                  clearInterval(pollingRef.current);
+                                  pollingRef.current = null;
+                                }
+                                setAiProgress(100);
+                                setAiDone(true);
+                                setExtracting(false);
+                                setExtractionDone(true);
+                                setExtractionStuck(false);
+                              } catch {
+                                toast({ title: 'Extraction not ready yet', description: 'Please wait a few more seconds and try again.', variant: 'destructive' });
+                              }
+                            }}
+                          >
+                            <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Check status now
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              // Escape hatch: seed empty requirements and let
+                              // the user continue reviewing manually.
+                              if (pollingRef.current) {
+                                clearInterval(pollingRef.current);
+                                pollingRef.current = null;
+                              }
+                              setExtracting(false);
+                              setExtractionDone(true);
+                              setExtractionStuck(false);
+                            }}
+                          >
+                            Continue without extraction
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   )}
 

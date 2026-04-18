@@ -6,13 +6,15 @@ import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Card, CardContent } from '@/components/ui/card';
+import { Textarea } from '@/components/ui/textarea';
 import {
   CheckCircle2, CircleDashed, Loader2, AlertCircle, XCircle, Slash,
   ArrowLeft, Download, Send, Printer, Eye, FileText, FileSpreadsheet,
   MessageSquare, Clock, ChevronRight, AlertTriangle, Pause, RefreshCw,
-  Bot, User,
+  Bot, User, CheckCheck,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { useAgentTypingByThread } from '@/hooks/useHitl';
 
 /* ── Types matching backend responses ─────────────────────────────────── */
 
@@ -124,12 +126,44 @@ const PIPELINE_STAGES = [
 
 const STAGE_ORDER = PIPELINE_STAGES.map(s => s.key);
 
-function stageStatus(itemState: string, stageKey: string): 'done' | 'active' | 'blocked' | 'pending' {
-  if (itemState === 'HUMAN_BLOCKED' || itemState === 'FAILED') return 'blocked';
-  const currentIdx = STAGE_ORDER.indexOf(itemState);
+function stageStatus(
+  itemState: string,
+  stageKey: string,
+  meta?: { last_successful_state?: string; blocked_at_stage?: string },
+): 'done' | 'active' | 'blocked' | 'pending' {
+  // Resolve the effective "how far did we get" marker. For blocked/failed
+  // items the raw state is ``HUMAN_BLOCKED``/``FAILED`` which doesn't
+  // say *where* the pipeline got to, so fall back to the last successful
+  // stage stashed on the item payload.
+  const isBlockedState = itemState === 'HUMAN_BLOCKED' || itemState === 'FAILED';
+  const progressState = isBlockedState && meta?.last_successful_state
+    ? meta.last_successful_state
+    : itemState;
+  const currentIdx = STAGE_ORDER.indexOf(progressState);
   const stageIdx = STAGE_ORDER.indexOf(stageKey);
+
+  // If the orchestrator recorded the stage it was blocked on, mark only
+  // *that* stage as blocked — earlier ones stay 'done', later ones 'pending'.
+  if (isBlockedState && meta?.blocked_at_stage) {
+    if (stageKey === meta.blocked_at_stage) return 'blocked';
+    if (stageIdx <= currentIdx) return 'done';
+    return 'pending';
+  }
+
+  // Legacy fallback: terminal-blocked with no hint → paint only the
+  // immediately-next stage as blocked rather than every pill.
+  if (isBlockedState) {
+    if (stageIdx <= currentIdx) return 'done';
+    if (stageIdx === currentIdx + 1) return 'blocked';
+    return 'pending';
+  }
+
   if (currentIdx < 0) return 'pending';
   if (stageIdx <= currentIdx) return 'done';
+  // The very next stage after the latest completed one is the one the
+  // pipeline is currently working on — render it with a spinner instead
+  // of leaving every non-done stage as a silent dashed circle.
+  if (stageIdx === currentIdx + 1) return 'active';
   return 'pending';
 }
 
@@ -173,7 +207,41 @@ export default function OrderDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mutating, setMutating] = useState(false);
+  const [lastFetchedAt, setLastFetchedAt] = useState<number>(Date.now());
+  const [lastStateChangeAt, setLastStateChangeAt] = useState<number>(Date.now());
+  const prevItemsKeyRef = React.useRef<string>('');
   const [expandedThreads, setExpandedThreads] = useState<Set<string>>(new Set());
+  // Per-thread composer state — the Issues tab is now fully interactive, so
+  // each expanded thread carries its own draft and an in-flight flag.
+  const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
+  const [threadBusy, setThreadBusy] = useState<Record<string, boolean>>({});
+
+  // Live agent-typing indicator for each expanded thread. We only
+  // subscribe while the card is open so we don't hold a WS per thread
+  // on the whole order page.
+  const expandedIds = React.useMemo(
+    () => Array.from(expandedThreads),
+    [expandedThreads],
+  );
+  const agentTypingByThread = useAgentTypingByThread(expandedIds);
+  // When an agent finishes typing, its reply has just landed — re-pull
+  // that thread's messages so the UI updates without waiting for the
+  // 15-second order-level poll. We track the previous typing state per
+  // thread and only refresh on a true→false transition.
+  const prevTypingRef = React.useRef<Record<string, boolean>>({});
+  React.useEffect(() => {
+    const prev = prevTypingRef.current;
+    for (const id of expandedIds) {
+      if (prev[id] && !agentTypingByThread[id]) {
+        // Fire-and-forget; errors surface through existing toast flows.
+        loadThreadMessages(id, { force: true });
+      }
+    }
+    prevTypingRef.current = { ...agentTypingByThread };
+    // loadThreadMessages is referentially stable enough for this
+    // transition check — intentionally omit from deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentTypingByThread, expandedIds]);
 
   const fetchAll = useCallback(async () => {
     if (!orderId) return;
@@ -192,6 +260,20 @@ export default function OrderDetail() {
       const orderThreads = hitlData.threads.filter(t => t.order_id === orderId);
       setThreads(orderThreads);
       setActivities(auditData.entries);
+      // Track when the pipeline last advanced so we can show a notice
+      // if it's been stalled. Compare by a cheap fingerprint of all
+      // (item_id, state) pairs so that any single item transition
+      // counts as progress.
+      const nowTs = Date.now();
+      setLastFetchedAt(nowTs);
+      const key = (orderData.items ?? [])
+        .map((it: any) => `${it.id}:${it.state}`)
+        .sort()
+        .join('|');
+      if (key !== prevItemsKeyRef.current) {
+        prevItemsKeyRef.current = key;
+        setLastStateChangeAt(nowTs);
+      }
     } catch (e: any) {
       setError(e.message || 'Failed to load order');
     } finally {
@@ -208,12 +290,92 @@ export default function OrderDetail() {
     return () => clearInterval(interval);
   }, [fetchAll, hasClassifying]);
 
-  const loadThreadMessages = async (threadId: string) => {
-    if (threadMessages[threadId]) return;
+  const loadThreadMessages = async (threadId: string, opts: { force?: boolean } = {}) => {
+    if (!opts.force && threadMessages[threadId]) return;
     try {
       const data = await apiGet<ThreadDetailResponse>(`/hitl/threads/${threadId}`);
       setThreadMessages(prev => ({ ...prev, [threadId]: data.messages }));
     } catch {}
+  };
+
+  // ── HiTL interactions (reply / option-select / resolve) ─────────────────
+  // The Issues tab used to be read-only, so operators had no way to clear
+  // an item out of HUMAN_BLOCKED from inside the order page.  These three
+  // handlers wrap the same endpoints the dedicated HiTL inbox uses so the
+  // unblock flow can happen in context.
+  const replyToThread = async (threadId: string) => {
+    const content = (threadDrafts[threadId] || '').trim();
+    if (!content) return;
+    setThreadBusy(prev => ({ ...prev, [threadId]: true }));
+    try {
+      await apiPost(`/hitl/threads/${threadId}/messages`, {
+        sender_type: 'human',
+        content,
+      });
+      setThreadDrafts(prev => ({ ...prev, [threadId]: '' }));
+      await loadThreadMessages(threadId, { force: true });
+      toast({ title: 'Reply sent' });
+    } catch (e: any) {
+      toast({ title: 'Reply failed', description: e?.message || String(e), variant: 'destructive' });
+    } finally {
+      setThreadBusy(prev => ({ ...prev, [threadId]: false }));
+    }
+  };
+
+  const selectThreadOption = async (
+    threadId: string,
+    optionIndex: number,
+    optionValue: string,
+  ) => {
+    setThreadBusy(prev => ({ ...prev, [threadId]: true }));
+    try {
+      await apiPost(`/hitl/threads/${threadId}/option-select`, {
+        option_index: optionIndex,
+        option_value: optionValue,
+      });
+      await loadThreadMessages(threadId, { force: true });
+      toast({ title: 'Option selected', description: optionValue });
+    } catch (e: any) {
+      toast({ title: 'Option-select failed', description: e?.message || String(e), variant: 'destructive' });
+    } finally {
+      setThreadBusy(prev => ({ ...prev, [threadId]: false }));
+    }
+  };
+
+  const resolveThreadAction = async (threadId: string) => {
+    setThreadBusy(prev => ({ ...prev, [threadId]: true }));
+    try {
+      await apiPost(`/hitl/threads/${threadId}/resolve`, {
+        note: 'Resolved from order page',
+      });
+      await loadThreadMessages(threadId, { force: true });
+      await fetchAll();
+      toast({
+        title: 'Thread resolved',
+        description: 'Click "Advance pipeline" to retry the blocked stage.',
+      });
+    } catch (e: any) {
+      toast({ title: 'Resolve failed', description: e?.message || String(e), variant: 'destructive' });
+    } finally {
+      setThreadBusy(prev => ({ ...prev, [threadId]: false }));
+    }
+  };
+
+  // The agent's most recent message can carry a list of options the operator
+  // is meant to pick from, e.g. ``context: { options: ["Use 25.4mm", "Skip"] }``.
+  // We surface those as buttons above the free-text composer.
+  const extractOptions = (messages: HiTLMessage[] | undefined): string[] => {
+    if (!messages || messages.length === 0) return [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.sender_type !== 'agent') continue;
+      const opts = m.context?.options;
+      if (Array.isArray(opts) && opts.every(o => typeof o === 'string')) {
+        return opts as string[];
+      }
+      break; // only consider the latest agent prompt
+    }
+    return [];
   };
 
   if (loading && !order) {
@@ -316,7 +478,12 @@ export default function OrderDetail() {
           <div className="flex items-center gap-0.5">
             {PIPELINE_STAGES.map((stage, i) => {
               // Use the most advanced item state to show overall pipeline progress
-              const status = stageStatus(order.items[0].state, stage.key);
+              const firstItem = order.items[0];
+              const meta = (firstItem.data ?? {}) as {
+                last_successful_state?: string;
+                blocked_at_stage?: string;
+              };
+              const status = stageStatus(firstItem.state, stage.key, meta);
               return (
                 <React.Fragment key={stage.key}>
                   <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors
@@ -339,6 +506,83 @@ export default function OrderDetail() {
             })}
           </div>
         )}
+
+        {/* Live progress notice — surfaces when the pipeline is mid-stage
+            and whether it has stalled. Without this the order page looks
+            frozen while an async worker is crunching away. */}
+        {order.items.length > 0 && (() => {
+          const itemState = order.items[0].state;
+          const TERMINAL = new Set(['DELIVERED', 'FAILED', 'HUMAN_BLOCKED']);
+          if (TERMINAL.has(itemState)) return null;
+          const currentIdx = STAGE_ORDER.indexOf(itemState);
+          const nextStage = currentIdx >= 0 && currentIdx + 1 < PIPELINE_STAGES.length
+            ? PIPELINE_STAGES[currentIdx + 1]
+            : null;
+          const stalledSec = Math.floor((lastFetchedAt - lastStateChangeAt) / 1000);
+          const isStalled = stalledSec > 45;
+          if (!nextStage) return null;
+          return (
+            <div className={`mt-2 flex items-center gap-2 text-xs ${
+              isStalled ? 'text-orange-700' : 'text-muted-foreground'
+            }`}>
+              {isStalled ? (
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              ) : (
+                <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
+              )}
+              <span>
+                {isStalled ? (
+                  <>
+                    Waiting on <strong>{nextStage.label}</strong> for {stalledSec}s — the
+                    orchestrator worker may not be running.
+                  </>
+                ) : (
+                  <>
+                    Running <strong>{nextStage.label}</strong> stage · polling every{' '}
+                    {hasClassifying ? '5' : '15'} s
+                  </>
+                )}
+              </span>
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0 text-xs"
+                onClick={() => fetchAll()}
+              >
+                Refresh now
+              </Button>
+              {isStalled && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  disabled={mutating}
+                  onClick={async () => {
+                    setMutating(true);
+                    try {
+                      const res = await apiPost<{ ran_steps: Array<{ stage: string; items_advanced: number; needs_hitl: number; failed: number }>; stalled_reason?: string | null }>(`/orders/${orderId}/advance`);
+                      const summary = res.ran_steps
+                        .map(s => `${s.stage} +${s.items_advanced}${s.needs_hitl ? ` (${s.needs_hitl} HITL)` : ''}`)
+                        .join(' · ') || 'no stage to run';
+                      toast({
+                        title: 'Pipeline advanced',
+                        description: res.stalled_reason ? `${summary} — stalled: ${res.stalled_reason}` : summary,
+                      });
+                      await fetchAll();
+                    } catch (e: any) {
+                      toast({ title: 'Advance failed', description: e.message || String(e), variant: 'destructive' });
+                    } finally {
+                      setMutating(false);
+                    }
+                  }}
+                >
+                  {mutating ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
+                  Advance pipeline
+                </Button>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Tabs + Activity sidebar */}
@@ -391,7 +635,11 @@ export default function OrderDetail() {
                         {PIPELINE_STAGES.map(s => (
                           <TableCell key={s.key} className="text-center p-0">
                             <div className="flex items-center justify-center h-10">
-                              <StateIcon state={stageStatus(item.state, s.key)} />
+                              <StateIcon state={stageStatus(
+                                item.state,
+                                s.key,
+                                (item.data ?? {}) as { last_successful_state?: string; blocked_at_stage?: string },
+                              )} />
                             </div>
                           </TableCell>
                         ))}
@@ -565,6 +813,88 @@ export default function OrderDetail() {
                                 </div>
                               </div>
                             ))}
+                            {agentTypingByThread[thread.thread_id] && (
+                              <div className="flex justify-start" role="status" aria-live="polite">
+                                <div className="max-w-[80%] rounded-lg px-3 py-2 text-xs bg-muted text-foreground">
+                                  <div className="font-medium mb-0.5 text-[10px] opacity-70">
+                                    {thread.agent_id}
+                                  </div>
+                                  <div className="flex items-center gap-1 h-4" aria-label={`${thread.agent_id} is typing`}>
+                                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce" style={{ animationDelay: '0ms' }} />
+                                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce" style={{ animationDelay: '150ms' }} />
+                                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce" style={{ animationDelay: '300ms' }} />
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Reply composer / option-select / resolve — only
+                                meaningful while the thread is still open. */}
+                            {messages && thread.status !== 'RESOLVED' && (
+                              <div className="mt-3 pt-3 border-t space-y-2">
+                                {(() => {
+                                  const options = extractOptions(messages);
+                                  if (options.length === 0) return null;
+                                  return (
+                                    <div className="flex flex-wrap gap-1.5">
+                                      <span className="text-[10px] text-muted-foreground self-center mr-1">
+                                        Pick one:
+                                      </span>
+                                      {options.map((opt, idx) => (
+                                        <Button
+                                          key={`${idx}-${opt}`}
+                                          size="sm"
+                                          variant="outline"
+                                          className="h-7 text-xs"
+                                          disabled={!!threadBusy[thread.thread_id]}
+                                          onClick={() => selectThreadOption(thread.thread_id, idx, opt)}
+                                        >
+                                          {opt}
+                                        </Button>
+                                      ))}
+                                    </div>
+                                  );
+                                })()}
+                                <Textarea
+                                  value={threadDrafts[thread.thread_id] || ''}
+                                  onChange={e => setThreadDrafts(prev => ({
+                                    ...prev,
+                                    [thread.thread_id]: e.target.value,
+                                  }))}
+                                  placeholder="Reply to the agent… (Shift+Enter for newline, Enter to send)"
+                                  className="text-xs min-h-[60px]"
+                                  disabled={!!threadBusy[thread.thread_id]}
+                                  onKeyDown={e => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                      e.preventDefault();
+                                      replyToThread(thread.thread_id);
+                                    }
+                                  }}
+                                />
+                                <div className="flex items-center justify-between gap-2">
+                                  <Button
+                                    size="sm"
+                                    className="h-7 text-xs"
+                                    disabled={!!threadBusy[thread.thread_id] || !(threadDrafts[thread.thread_id] || '').trim()}
+                                    onClick={() => replyToThread(thread.thread_id)}
+                                  >
+                                    {threadBusy[thread.thread_id]
+                                      ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                      : <Send className="w-3 h-3 mr-1" />}
+                                    Send reply
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 text-xs"
+                                    disabled={!!threadBusy[thread.thread_id]}
+                                    onClick={() => resolveThreadAction(thread.thread_id)}
+                                  >
+                                    <CheckCheck className="w-3 h-3 mr-1" /> Resolve
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         )}
                       </CardContent>
