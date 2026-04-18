@@ -76,6 +76,29 @@ class CompositionError(RuntimeError):
     """Raised when the Composer cannot produce a spec-compliant SVG."""
 
 
+def _has_reference_inputs(fused: dict) -> bool:
+    """Return True iff the fused item has everything the v2 reference
+    generator (``scripts/gen_diecuts_v2.py`` → ``diecut_reference.py``)
+    needs to produce a sign-off-quality label:
+
+      * non-empty ``item_no``, ``description``, ``upc``
+      * carton dimensions in inches (either via ``box_L/W/H`` or
+        ``product_dims.length/width/height``)
+
+    Falls back to the legacy template builder for partial/demo items.
+    """
+    if not fused.get("item_no") or not fused.get("description"):
+        return False
+    if not fused.get("upc"):
+        return False
+    dims = fused.get("product_dims") or {}
+    have_dims = (
+        (fused.get("box_L") and fused.get("box_W") and fused.get("box_H"))
+        or (dims.get("length") and dims.get("width") and dims.get("height"))
+    )
+    return bool(have_dims)
+
+
 class ComposerAgent(BaseAgent):
     """Assembles the die-cut SVG from template + warnings + drawing + text."""
 
@@ -99,6 +122,58 @@ class ComposerAgent(BaseAgent):
                     needs_hitl=True,
                     hitl_reason="Composer received fused item without item_no",
                 )
+
+            # Reference-template path: when the item carries the metadata
+            # the v2 generator needs (dims + upc + description), delegate
+            # to the ``diecut_reference`` module so the output matches the
+            # approval-PDF layout the operator signs off on. The legacy
+            # ``_build_svg`` path stays available as fallback for items
+            # that lack dims/upc (demo seeds, malformed fusions).
+            if _has_reference_inputs(fused):
+                try:
+                    from labelforge.agents.diecut_reference import (
+                        generate_diecut_for_payload,
+                    )
+                    svg_text = generate_diecut_for_payload(
+                        fused, order_payload=input_data.get("order") or {},
+                    )
+                    svg_bytes = svg_text.encode("utf-8")
+                    content_hash = hashlib.sha256(svg_bytes).hexdigest()
+                    provenance = {
+                        "artifact_type": "die_cut_svg",
+                        "content_hash": f"sha256:{content_hash}",
+                        "artifact_id": content_hash[:16],
+                        "frozen_inputs": {
+                            "profile_version": profile.get("version"),
+                            "rules_snapshot_id": report.get("rules_snapshot_id"),
+                            "generator": "diecut_reference.v2",
+                        },
+                        "generator": "diecut_reference.v2",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    logger.info(
+                        "Composer (v2): item=%s hash=%s",
+                        fused.get("item_no"), content_hash[:12],
+                    )
+                    return AgentResult(
+                        success=True,
+                        data={
+                            "die_cut_svg": svg_text,
+                            "provenance": provenance,
+                            "placements": [],
+                            "item_state": "COMPOSED",
+                        },
+                        confidence=0.95,
+                        cost=0.0,
+                    )
+                except Exception as exc:
+                    # Fall through to legacy path — log loudly so we know
+                    # the v2 generator failed on this item specifically.
+                    logger.warning(
+                        "Composer: v2 reference generator failed for %s (%s) — "
+                        "falling back to template builder",
+                        fused.get("item_no"), exc,
+                    )
 
             # F6 — load brand/logo. Falls back to the importer name when the
             # profile's brand_treatment is incomplete but never emits the
