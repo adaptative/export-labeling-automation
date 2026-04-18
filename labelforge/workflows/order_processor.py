@@ -333,13 +333,137 @@ async def compliance_eval_activity(input: ActivityInput) -> ActivityOutput:
 
 @activity.defn
 async def generate_drawing_activity(input: ActivityInput) -> ActivityOutput:
-    """Generate die-cut drawings for a compliant item."""
+    """Generate product line-art SVGs for each fused item on the order.
+
+    Extracts raster product images from the order's PDF documents via
+    :class:`ProductImageProcessorAgent` (raster → vectorised SVG), and
+    writes them back into ``payload["line_drawings_svg"]`` keyed by
+    ``item_no`` so :func:`compose_label_activity` can embed them on the
+    SHORT panels of the die-cut.
+
+    Assignment heuristic (first pass):
+      * If ``image_ref`` contains the item_no, use that image for the item.
+      * Otherwise, assign by position (sorted item_no ↔ image index).
+      * Items with no matching image get ``None`` and Composer skips the
+        drawing frame for them (existing behaviour).
+
+    Best-effort: exceptions (missing BlobStore key, corrupt PDF, …) are
+    logged and the activity still succeeds so the pipeline doesn't stall
+    at Drawings. A future iteration can surface a HiTL when
+    ``aggregate_confidence`` is low.
+    """
     activity.logger.info("Generating drawing for item %s", input.item_id)
+
+    fused_items = input.payload.get("fused_items") or []
+    order_id = getattr(input, "order_id", None) or input.payload.get("order_id")
+    tenant_id = getattr(input, "tenant_id", None) or input.payload.get("tenant_id")
+
+    # Re-entrancy: if a previous drawing pass already populated the
+    # payload, don't overwrite it. Lets operators patch ``line_drawing_svg``
+    # via chat and re-run Drawings without clobbering their work.
+    existing = input.payload.get("line_drawings_svg") or {}
+    if existing and all(existing.get(str(it.get("item_no"))) for it in fused_items):
+        return ActivityOutput(
+            success=True,
+            item_id=input.item_id,
+            new_state=ItemState.DRAWING_GENERATED.value,
+            data=input.payload,
+        )
+
+    drawings: dict[str, str] = dict(existing)
+    try:
+        if not fused_items or not order_id or not tenant_id:
+            raise RuntimeError(
+                "missing fused_items / order_id / tenant_id — drawing activity "
+                "needs the full advance-pipeline payload to locate source PDFs"
+            )
+
+        from labelforge.agents.product_image_processor import (
+            ProductImageProcessorAgent,
+        )
+        from labelforge.api.v1.documents import get_blob_store
+        from labelforge.db.models import Document
+        from labelforge.db import session as _session_mod
+        from sqlalchemy import select
+
+        # Load order PDFs from the DB + blob store. Non-PDF docs
+        # (spreadsheets, images) are skipped — the processor's PDF path
+        # does the heavy lifting.
+        async with _session_mod.async_session_factory() as db:
+            rows = await db.execute(
+                select(Document).where(
+                    Document.order_id == order_id,
+                    Document.tenant_id == tenant_id,
+                )
+            )
+            docs = rows.scalars().all()
+
+        pdf_docs = [d for d in docs if d.filename.lower().endswith(".pdf")]
+        if not pdf_docs:
+            activity.logger.info(
+                "generate_drawing: no PDF documents on order %s — "
+                "composer will emit labels without product line-art", order_id,
+            )
+        else:
+            store = get_blob_store()
+            processed_all: list[dict] = []
+            for doc in pdf_docs:
+                try:
+                    pdf_bytes = await store.download(doc.s3_key)
+                except Exception as exc:
+                    activity.logger.warning(
+                        "generate_drawing: failed to fetch %s: %s",
+                        doc.filename, exc,
+                    )
+                    continue
+                agent = ProductImageProcessorAgent()
+                result = await agent.execute({"pdf_bytes": pdf_bytes})
+                processed_all.extend(result.data.get("images", []))
+
+            # Assignment: first try by item_no substring match on the
+            # image_ref; then fall back to positional assignment.
+            unassigned: list[dict] = []
+            sorted_items = sorted(
+                fused_items, key=lambda it: str(it.get("item_no") or "")
+            )
+            for img in processed_all:
+                ref = str(img.get("image_ref", ""))
+                matched = False
+                for it in sorted_items:
+                    item_no = str(it.get("item_no") or "")
+                    if item_no and item_no in ref and item_no not in drawings:
+                        drawings[item_no] = img.get("svg") or ""
+                        matched = True
+                        break
+                if not matched:
+                    unassigned.append(img)
+
+            remaining = [
+                it for it in sorted_items
+                if str(it.get("item_no") or "") not in drawings
+            ]
+            for it, img in zip(remaining, unassigned):
+                item_no = str(it.get("item_no") or "")
+                if item_no:
+                    drawings[item_no] = img.get("svg") or ""
+
+            activity.logger.info(
+                "generate_drawing: produced %d drawings for %d items on order %s",
+                len(drawings), len(fused_items), order_id,
+            )
+    except Exception as exc:
+        # Best-effort: composer handles missing drawings gracefully.
+        activity.logger.warning(
+            "generate_drawing: extraction failed (%s) — continuing without "
+            "line-art; composer will emit labels with a blank drawing frame",
+            exc,
+        )
+
     return ActivityOutput(
         success=True,
         item_id=input.item_id,
         new_state=ItemState.DRAWING_GENERATED.value,
-        data=input.payload,
+        data={**input.payload, "line_drawings_svg": drawings},
     )
 
 

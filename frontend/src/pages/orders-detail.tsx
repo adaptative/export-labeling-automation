@@ -527,19 +527,34 @@ export default function OrderDetail() {
             ? PIPELINE_STAGES[currentIdx + 1]
             : null;
           const stalledSec = Math.floor((lastFetchedAt - lastStateChangeAt) / 1000);
-          const isStalled = stalledSec > 45;
+          // VALIDATED is a human-approval gate, not an automated stage —
+          // the orchestrator is NOT expected to advance it on its own.
+          // Without this carve-out the page mis-alarms after 45s of
+          // "waiting on Review" with "orchestrator worker may not be
+          // running", which is wrong and scary.
+          const needsHumanApproval = itemState === 'VALIDATED';
+          const isStalled = !needsHumanApproval && stalledSec > 45;
           if (!nextStage) return null;
           return (
             <div className={`mt-2 flex items-center gap-2 text-xs ${
-              isStalled ? 'text-orange-700' : 'text-muted-foreground'
+              isStalled ? 'text-orange-700'
+              : needsHumanApproval ? 'text-emerald-700'
+              : 'text-muted-foreground'
             }`}>
               {isStalled ? (
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              ) : needsHumanApproval ? (
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
               ) : (
                 <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
               )}
               <span>
-                {isStalled ? (
+                {needsHumanApproval ? (
+                  <>
+                    All items validated — ready for <strong>your approval</strong>.
+                    Click <em>Approve &amp; Send</em> to finalize.
+                  </>
+                ) : isStalled ? (
                   <>
                     Waiting on <strong>{nextStage.label}</strong> for {stalledSec}s — the
                     orchestrator worker may not be running.
