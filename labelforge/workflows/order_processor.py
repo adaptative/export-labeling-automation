@@ -465,7 +465,23 @@ async def validate_output_activity(input: ActivityInput) -> ActivityOutput:
                 "expected_dimensions_mm": expected_dims,
                 "placements": placements,
             })
-            reports[item_no] = result.data.get("validation_report", {})
+            report = dict(result.data.get("validation_report", {}) or {})
+            # Operator override: when chat has set ``validation_override``
+            # on the item (via the validator handler's patch-allowlist),
+            # treat a failing validation as a passing one — the failure
+            # is recorded in the report alongside the override note for
+            # audit trail, but the activity no longer raises HiTL. This
+            # is the wire-up for the "(b) accept the failure with an
+            # override note" escape hatch the validator role description
+            # already promises the operator.
+            if bool(item.get("validation_override")):
+                report["override_accepted"] = True
+                note = item.get("override_note") or item.get("override_reason")
+                if note:
+                    report["override_note"] = str(note)
+                reports[item_no] = report
+                continue
+            reports[item_no] = report
             critical_total += result.data.get("critical_count", 0)
             if result.needs_hitl:
                 any_hitl = True
