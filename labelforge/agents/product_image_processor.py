@@ -113,12 +113,25 @@ class ProcessedImage:
 # ── Public extraction helpers ────────────────────────────────────────────────
 
 
+# PDFs carry many tiny embedded images that are NOT product photos —
+# logos, decorative flourishes, text rendered as images, thumbnail
+# icons. Accepting all of them produces garbage vectorisations of
+# glyph fragments. Product photos on order PDFs are always at least a
+# few hundred pixels on a side.
+_MIN_PDF_IMAGE_WIDTH = 200
+_MIN_PDF_IMAGE_HEIGHT = 200
+
+
 def extract_images_from_pdf(data: bytes) -> list[tuple[str, bytes]]:
-    """Return ``[(image_ref, image_bytes), ...]`` for every image in the PDF.
+    """Return ``[(image_ref, image_bytes), ...]`` for product-sized images.
 
     ``image_ref`` is formatted ``page{n}-img{idx}`` so callers can correlate
-    outputs back to their source page.  Returns an empty list if PyMuPDF is
-    unavailable or the PDF is unreadable.
+    outputs back to their source page.
+
+    Applies a size filter (``_MIN_PDF_IMAGE_WIDTH`` × ``_MIN_PDF_IMAGE_HEIGHT``)
+    so decorative fragments, text glyphs and logos don't get misclassified as
+    product shots. Returns an empty list if PyMuPDF is unavailable or the
+    PDF is unreadable.
     """
     try:
         import fitz  # PyMuPDF
@@ -132,6 +145,18 @@ def extract_images_from_pdf(data: bytes) -> list[tuple[str, bytes]]:
             for page_idx, page in enumerate(doc):
                 for img_idx, img in enumerate(page.get_images(full=True)):
                     xref = img[0]
+                    # img tuple shape: (xref, smask, width, height, bpc,
+                    # colorspace, alt, name, filter) — fields 2/3 are
+                    # native pixel dims, cheap to check before extracting.
+                    try:
+                        raw_w = int(img[2]) if len(img) > 2 else 0
+                        raw_h = int(img[3]) if len(img) > 3 else 0
+                    except (TypeError, ValueError):
+                        raw_w = raw_h = 0
+                    if (raw_w and raw_w < _MIN_PDF_IMAGE_WIDTH) or (
+                        raw_h and raw_h < _MIN_PDF_IMAGE_HEIGHT
+                    ):
+                        continue
                     try:
                         base = doc.extract_image(xref)
                     except Exception as exc:  # pragma: no cover — malformed
@@ -174,43 +199,69 @@ def preprocess_image(data: bytes) -> Optional["_PreparedBitmap"]:
     return _PreparedBitmap(binary=binary, width=img.width, height=img.height)
 
 
-def vectorize_to_svg(bitmap: "_PreparedBitmap", grid: int = _VECTORIZE_GRID) -> str:
-    """Return a valid SVG string approximating the bitmap.
+# Maximum longest-edge (px) for the embedded raster. Product photos on
+# PO PDFs are typically 800–2000px; downsampling to this ceiling keeps
+# SVG payload under ~50KB base64 while preserving enough detail for the
+# die-cut preview to show a recognisable product silhouette.
+_EMBED_MAX_EDGE = 512
 
-    The bitmap is resampled into a ``grid × grid`` matrix and each "ink"
-    cell becomes a ``<rect>`` in the SVG.  Coarse but deterministic, fast,
-    and dependency-free beyond Pillow.
+
+def vectorize_to_svg(bitmap: "_PreparedBitmap", grid: int = _VECTORIZE_GRID) -> str:
+    """Return an SVG that embeds the preprocessed bitmap as a PNG raster.
+
+    The previous implementation dumped a ``grid × grid`` matrix of
+    ``<rect>`` cells — fast, dependency-free, but produced a Lego-brick
+    mosaic that looked nothing like the product (especially when the
+    input contained text fragments, which the coarse grid flattened
+    into illegible black blobs).
+
+    New strategy: downsample the preprocessed bitmap to ``_EMBED_MAX_EDGE``,
+    encode as PNG, base64-inline into a single ``<image>`` tag. The result:
+      * Preview shows the actual product photo at recognisable fidelity.
+      * File stays bounded (≤ ~50KB for a 512-px PNG).
+      * Zero new dependencies — uses the same Pillow already in the deps.
+
+    ``grid`` is kept in the signature for backwards compatibility (tests
+    that pass it still work) but is ignored.
     """
+    import base64
+
     w, h = bitmap.width, bitmap.height
     if w <= 0 or h <= 0:
         return _empty_svg(w, h)
 
     try:
-        thumb = bitmap.binary.resize((grid, grid))
-    except Exception:
+        from PIL import Image as _PILImage  # noqa: F401 — ensure Pillow import
+    except ImportError:  # pragma: no cover — Pillow is in deps
         return _empty_svg(w, h)
 
-    pixels = thumb.load()
-    cell_w = w / grid
-    cell_h = h / grid
-    rects: list[str] = []
-    for row in range(grid):
-        for col in range(grid):
-            v = pixels[col, row]
-            # Mode "1" returns 0/255; treat 0 as ink.
-            if v == 0:
-                x = col * cell_w
-                y = row * cell_h
-                rects.append(
-                    f'<rect x="{x:.2f}" y="{y:.2f}" '
-                    f'width="{cell_w:.2f}" height="{cell_h:.2f}" '
-                    f'fill="black"/>'
-                )
-    body = "".join(rects)
+    try:
+        img = bitmap.binary.convert("L")
+        # Fit within a max-edge square box while preserving aspect.
+        max_edge = max(img.width, img.height)
+        if max_edge > _EMBED_MAX_EDGE:
+            scale = _EMBED_MAX_EDGE / max_edge
+            new_size = (
+                max(1, int(round(img.width * scale))),
+                max(1, int(round(img.height * scale))),
+            )
+            img = img.resize(new_size)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as exc:
+        logger.warning("vectorize_to_svg: raster embed failed (%s)", exc)
+        return _empty_svg(w, h)
+
+    href = f"data:image/png;base64,{b64}"
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
         f'viewBox="0 0 {w} {h}" width="{w}" height="{h}">'
-        f"{body}</svg>"
+        f'<image x="0" y="0" width="{w}" height="{h}" '
+        f'preserveAspectRatio="xMidYMid meet" '
+        f'xlink:href="{href}" href="{href}"/>'
+        f'</svg>'
     )
 
 
