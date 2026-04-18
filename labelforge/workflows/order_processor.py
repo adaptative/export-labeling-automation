@@ -465,7 +465,23 @@ async def validate_output_activity(input: ActivityInput) -> ActivityOutput:
                 "expected_dimensions_mm": expected_dims,
                 "placements": placements,
             })
-            reports[item_no] = result.data.get("validation_report", {})
+            report = dict(result.data.get("validation_report", {}) or {})
+            # Operator override: when chat has set ``validation_override``
+            # on the item (via the validator handler's patch-allowlist),
+            # treat a failing validation as a passing one — the failure
+            # is recorded in the report alongside the override note for
+            # audit trail, but the activity no longer raises HiTL. This
+            # is the wire-up for the "(b) accept the failure with an
+            # override note" escape hatch the validator role description
+            # already promises the operator.
+            if bool(item.get("validation_override")):
+                report["override_accepted"] = True
+                note = item.get("override_note") or item.get("override_reason")
+                if note:
+                    report["override_note"] = str(note)
+                reports[item_no] = report
+                continue
+            reports[item_no] = report
             critical_total += result.data.get("critical_count", 0)
             if result.needs_hitl:
                 any_hitl = True
@@ -535,6 +551,28 @@ async def _load_active_rules_for_tenant(tenant_id: str) -> list[dict]:
         return []
 
 
+_FIELD_NAME_RE = __import__("re").compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,39}$")
+
+
+def _looks_like_field_name(s: str) -> bool:
+    """Return True iff ``s`` looks like a short identifier, not a sentence.
+
+    Required-field lists come from ``importer_profile.panel_layouts`` which
+    is LLM-extracted. Upstream extractions occasionally drop full warning-
+    label sentences or URLs into these lists (e.g. "for more information
+    go to www.p65warnings.ca.gov/furniture" instead of "prop65_warning").
+    Without this guard those strings become "required fields", fail every
+    validation pass as missing, and spawn a duplicate HiTL thread per
+    order item — the validator's failure reason then reads like prose
+    because it's listing warning-label text as field names.
+
+    The filter is conservative: identifiers must start with a letter,
+    contain only ``[A-Za-z0-9_]``, and be ≤ 40 chars. Anything else
+    (spaces, URLs, colons, dashes, sentences) is rejected with a log.
+    """
+    return bool(_FIELD_NAME_RE.match(s or ""))
+
+
 def _required_fields_from_profile(profile: dict) -> list[str]:
     """Extract the union of field names declared in a profile's panel_layouts.
 
@@ -542,20 +580,45 @@ def _required_fields_from_profile(profile: dict) -> list[str]:
     Review) are always included even when the profile's panel_layouts are
     empty — the Validator treats missing baseline fields as Critical and
     the pipeline blocks the order on HUMAN_BLOCKED until resolved.
+
+    Entries that don't look like short identifiers are dropped — see
+    :func:`_looks_like_field_name` for the rationale.
     """
+    import logging
+    _log = logging.getLogger(__name__)
+
     layouts = profile.get("panel_layouts") or {}
     required: set[str] = {
         "item_no", "case_qty", "dimensions",
         "country_of_origin", "barcode",
     }
+    rejected: list[str] = []
+
+    def _extend(values):
+        for f in values:
+            s = str(f).strip()
+            if _looks_like_field_name(s):
+                required.add(s)
+            else:
+                rejected.append(s)
+
     if isinstance(layouts, dict):
         for panel, spec in layouts.items():
             if isinstance(spec, list):
-                required.update(str(f) for f in spec)
+                _extend(spec)
             elif isinstance(spec, dict):
                 if spec.get("selected") is False:
                     continue
-                required.update(str(f) for f in spec.get("fields", []))
+                _extend(spec.get("fields") or [])
+
+    if rejected:
+        _log.warning(
+            "validator: dropped %d non-identifier entries from panel_layouts "
+            "(examples: %r) — these look like warning-label text or URLs, "
+            "not field names. The importer profile's onboarding extraction "
+            "likely needs rerunning.",
+            len(rejected), rejected[:3],
+        )
     return sorted(required)
 
 

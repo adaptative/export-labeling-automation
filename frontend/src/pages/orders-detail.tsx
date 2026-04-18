@@ -256,8 +256,16 @@ export default function OrderDetail() {
       ]);
       setOrder(orderData);
       setDocuments(docsData.documents);
-      // Filter threads by order_id (backend may not filter by order)
-      const orderThreads = hitlData.threads.filter(t => t.order_id === orderId);
+      // Filter threads by order_id AND hide terminal statuses — the
+      // "Issues" tab is a blocker inbox, not an audit log. Leaving
+      // RESOLVED / CANCELLED / ESCALATED_RESOLVED threads in the list
+      // is what made users think resolving didn't "do anything" — they
+      // clicked Resolve, the row flipped status but stayed on screen,
+      // and the count next to "Issues (N)" never dropped.
+      const TERMINAL_STATUSES = new Set(['RESOLVED', 'CANCELLED']);
+      const orderThreads = hitlData.threads.filter(
+        t => t.order_id === orderId && !TERMINAL_STATUSES.has(t.status),
+      );
       setThreads(orderThreads);
       setActivities(auditData.entries);
       // Track when the pipeline last advanced so we can show a notice
@@ -560,7 +568,12 @@ export default function OrderDetail() {
                   onClick={async () => {
                     setMutating(true);
                     try {
-                      const res = await apiPost<{ ran_steps: Array<{ stage: string; items_advanced: number; needs_hitl: number; failed: number }>; stalled_reason?: string | null }>(`/orders/${orderId}/advance`);
+                      // force=true: operator explicitly asked to retry — run the
+                      // full _STAGE_PLAN cascade after rescue. The auto-advance
+                      // hook that fires on HiTL Resolve uses the default
+                      // (force=false) so it only rescues, never auto-re-
+                      // validates (which would just re-spawn the same thread).
+                      const res = await apiPost<{ ran_steps: Array<{ stage: string; items_advanced: number; needs_hitl: number; failed: number }>; stalled_reason?: string | null }>(`/orders/${orderId}/advance?force=true`);
                       const summary = res.ran_steps
                         .map(s => `${s.stage} +${s.items_advanced}${s.needs_hitl ? ` (${s.needs_hitl} HITL)` : ''}`)
                         .join(' · ') || 'no stage to run';

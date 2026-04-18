@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
@@ -403,6 +403,111 @@ async def update_importer(
     await db.refresh(importer)
     profile = await _latest_profile(db, importer.id)
     return _profile_to_contract(importer, profile)
+
+
+class SanitizePanelLayoutsResponse(BaseModel):
+    importer_id: str
+    new_version: Optional[int] = None
+    dropped_entries: List[str] = []
+    kept_entries: List[str] = []
+
+
+@router.post(
+    "/{importer_id}/profile/sanitize-panel-layouts",
+    response_model=SanitizePanelLayoutsResponse,
+)
+async def sanitize_panel_layouts(
+    importer_id: str,
+    dry_run: bool = Query(
+        False,
+        description=(
+            "When true, report what would be dropped/kept without writing "
+            "a new profile version. Handy for 'audit before clean'."
+        ),
+    ),
+    _user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SanitizePanelLayoutsResponse:
+    """Strip non-identifier entries out of the stored ``panel_layouts``.
+
+    Onboarding LLM extraction occasionally writes full warning-label
+    sentences and URLs into ``panel_layouts`` instead of short field
+    identifiers. The Validator then reports those strings as "missing
+    required fields" on every item — unreadable prose in the HiTL
+    reason, duplicate threads per item, operator stuck. See the
+    companion filter :func:`_looks_like_field_name` in
+    ``labelforge/workflows/order_processor.py``.
+
+    This endpoint runs the same filter over the stored profile and
+    writes a new ``ImporterProfileModel`` version with the cleaned
+    layouts. Use ``?dry_run=true`` to see what would change first.
+    Running extraction again ('/onboard/rerun-agent') is an
+    alternative but heavier — this is a local, deterministic fix.
+    """
+    from labelforge.workflows.order_processor import _looks_like_field_name
+
+    importer = await _get_importer_or_404(db, importer_id, _user.tenant_id)
+    current = await _latest_profile(db, importer.id)
+    if current is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Importer has no profile yet — nothing to sanitize.",
+        )
+
+    layouts = dict(current.panel_layouts or {})
+    cleaned: dict = {}
+    dropped: list[str] = []
+    kept: list[str] = []
+
+    def _sift(values):
+        ok, junk = [], []
+        for f in values:
+            s = str(f).strip()
+            (ok if _looks_like_field_name(s) else junk).append(s)
+        return ok, junk
+
+    for panel, spec in layouts.items():
+        if isinstance(spec, list):
+            ok, junk = _sift(spec)
+            cleaned[panel] = ok
+            kept.extend(ok); dropped.extend(junk)
+        elif isinstance(spec, dict):
+            fields = spec.get("fields") or []
+            ok, junk = _sift(fields)
+            cleaned[panel] = {**spec, "fields": ok}
+            kept.extend(ok); dropped.extend(junk)
+        else:
+            # Preserve unknown shapes as-is; log but don't touch.
+            cleaned[panel] = spec
+
+    if dry_run or not dropped:
+        return SanitizePanelLayoutsResponse(
+            importer_id=importer.id,
+            new_version=None,
+            dropped_entries=sorted(set(dropped)),
+            kept_entries=sorted(set(kept)),
+        )
+
+    new_profile = ImporterProfileModel(
+        id=str(uuid4()),
+        importer_id=importer.id,
+        tenant_id=_user.tenant_id,
+        version=current.version + 1,
+        brand_treatment=current.brand_treatment,
+        panel_layouts=cleaned,
+        handling_symbol_rules=current.handling_symbol_rules,
+        pi_template_mapping=current.pi_template_mapping,
+        logo_asset_hash=current.logo_asset_hash,
+    )
+    db.add(new_profile)
+    await db.commit()
+
+    return SanitizePanelLayoutsResponse(
+        importer_id=importer.id,
+        new_version=new_profile.version,
+        dropped_entries=sorted(set(dropped)),
+        kept_entries=sorted(set(kept)),
+    )
 
 
 @router.delete("/{importer_id}", status_code=204)

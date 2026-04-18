@@ -59,6 +59,16 @@ _VALIDATOR_PATCH_KEYS = (
     # fusion can touch plus the compliance ones.
     *_FUSION_PATCH_KEYS,
     *_COMPLIANCE_PATCH_KEYS,
+    # Human-in-the-loop override path. Operators hit duplicate "required
+    # field missing" failures all the time on items where the missing
+    # field is genuinely out of scope (e.g. furniture that doesn't need
+    # a prop65 warning for a non-CA destination). The handler's role
+    # description already lists "(b) accept the failure with an override
+    # note" as a valid resolution path — these keys make that path
+    # actually work instead of failing the allowlist check.
+    "validation_override",
+    "override_note",
+    "override_reason",
 )
 
 _INTAKE_PATCH_KEYS = (

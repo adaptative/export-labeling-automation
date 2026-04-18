@@ -16,7 +16,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from labelforge.api.v1.orders import _rescue_resolved_items
+from labelforge.api.v1.orders import _rescue_resolved_items, advance_order_pipeline
+from labelforge.core.auth import Capability, Role, TokenPayload
 from labelforge.db import session as _session_mod
 from labelforge.db.base import Base
 from labelforge.db.models import (
@@ -186,3 +187,94 @@ async def test_rescue_with_missing_last_successful_state_falls_back_to_fused(
     async with factory() as sess:
         order2 = await _load_order(sess, "ORD-Y")
         assert order2.items[0].state == "FUSED"
+
+
+def _sys_token() -> TokenPayload:
+    import time as _t
+    return TokenPayload(
+        user_id="sys:test",
+        tenant_id="t1",
+        role=Role.OPS,
+        capabilities={
+            Capability.ORDER_VIEW,
+            Capability.ORDER_REPROCESS,
+            Capability.ITEM_REPRODUCE,
+        },
+        exp=_t.time() + 3600,
+    )
+
+
+@pytest.mark.asyncio
+async def test_advance_without_force_stops_after_rescue(
+    order_with_blocked_items,
+):
+    """Soft-advance guard: when the auto-advance hook (force=False, the
+    default) fires on Resolve, the endpoint rescues resolved items and
+    then returns immediately — it must NOT run ``_STAGE_PLAN`` on the
+    rescued item, because that would re-validate, re-fail, and open a
+    fresh HiTL thread (the exact feedback loop the operator hit:
+    "resolved several items but list still showing 7 items").
+    """
+    factory = order_with_blocked_items
+
+    async with factory() as sess:
+        resp = await advance_order_pipeline(
+            order_id="ORD-X",
+            force=False,
+            _user=_sys_token(),
+            db=sess,
+        )
+
+    # Rescue ran for item A1 (all threads RESOLVED) and that's it.
+    stages = [s.stage for s in resp.ran_steps]
+    assert stages == ["UNBLOCKED"], (
+        f"soft advance should stop after UNBLOCKED; saw {stages!r}"
+    )
+    assert resp.ran_steps[0].items_advanced == 1
+
+    # Critical invariant: no new OPEN HiTL thread was created for A1 as
+    # a side effect of re-running validation. Count OPEN threads for A1
+    # directly.
+    from labelforge.db.models import HiTLThreadModel
+    from sqlalchemy import select, func
+
+    async with factory() as sess:
+        a1_open = (await sess.execute(
+            select(func.count(HiTLThreadModel.id)).where(
+                HiTLThreadModel.order_id == "ORD-X",
+                HiTLThreadModel.item_no == "A1",
+                HiTLThreadModel.status == "OPEN",
+            )
+        )).scalar_one()
+    assert a1_open == 0, (
+        "soft advance must not spawn a new HiTL thread on the rescued item"
+    )
+
+
+@pytest.mark.asyncio
+async def test_advance_with_force_runs_stage_plan_after_rescue(
+    order_with_blocked_items,
+):
+    """Hard-advance path: frontend 'Advance pipeline' button passes
+    ``force=true``. The endpoint rescues first, then drops into the
+    ``_STAGE_PLAN`` loop — so ``ran_steps`` contains more than just
+    the UNBLOCKED step. Exact downstream stages depend on activity
+    outcomes (and may produce HiTL threads when data is still bad),
+    but the guarantee we need is that the cascade *ran*."""
+    factory = order_with_blocked_items
+
+    async with factory() as sess:
+        resp = await advance_order_pipeline(
+            order_id="ORD-X",
+            force=True,
+            _user=_sys_token(),
+            db=sess,
+        )
+
+    stages = [s.stage for s in resp.ran_steps]
+    assert "UNBLOCKED" in stages
+    # Something beyond UNBLOCKED ran (either a successful stage or a
+    # stage that re-blocked — either way, the cascade executed).
+    assert len(stages) > 1, (
+        f"force advance should run _STAGE_PLAN after UNBLOCKED; saw {stages!r}"
+    )

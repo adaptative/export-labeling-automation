@@ -1463,6 +1463,20 @@ _STAGE_PLAN: list[tuple[str, str, str]] = [
 @router.post("/{order_id}/advance", response_model=AdvanceResponse)
 async def advance_order_pipeline(
     order_id: str,
+    force: bool = Query(
+        False,
+        description=(
+            "When false (default, used by the auto-advance hook that fires "
+            "after a HiTL Resolve), only the self-heal rescue pass runs — "
+            "items whose threads are all RESOLVED flip back to their "
+            "``last_successful_state`` and the endpoint returns. The "
+            "``_STAGE_PLAN`` cascade is skipped so the just-unblocked item "
+            "does not immediately re-validate, re-fail, and spawn a new "
+            "HiTL thread. When true (frontend 'Advance pipeline' button), "
+            "the full cascade runs after rescue — the operator is explicitly "
+            "asking to retry validation."
+        ),
+    ),
     _user: TokenPayload = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> AdvanceResponse:
@@ -1525,6 +1539,26 @@ async def advance_order_pipeline(
             failed=0,
             cost_usd=0.0,
         ))
+        await db.commit()
+        # Soft-advance: stop here unless the caller explicitly asked to
+        # re-run validation. Without this guard the auto-advance hook that
+        # fires on every HiTL Resolve would immediately push the just-
+        # unblocked item back through ``_STAGE_PLAN`` — and since resolving
+        # a thread does not mutate ``item.data``, validation would fail
+        # for the same reason and spawn a fresh HiTL thread. Net effect
+        # for the operator: resolve one, see one appear; inbox count
+        # never drops. The frontend 'Advance pipeline' button passes
+        # ``force=true`` for the hard-retry path.
+        if not force:
+            tally: dict[str, int] = {}
+            for it in order.items:
+                tally[it.state] = tally.get(it.state, 0) + 1
+            return AdvanceResponse(
+                order_id=order_id,
+                ran_steps=ran_steps,
+                final_states=tally,
+                stalled_reason=None,
+            )
 
     for from_state, to_state, activity_name in _STAGE_PLAN:
         candidates = [it for it in order.items if it.state == from_state]
